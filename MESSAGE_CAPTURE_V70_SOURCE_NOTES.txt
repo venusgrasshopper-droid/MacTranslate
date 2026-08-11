@@ -1,0 +1,6 @@
+V7.0 rebuild base: RP01 v6.1.1 source-backed package where Telegram/Signal/Teams had already produced real rows.
+WhatsApp runtime: rendered new-message rows under #main only; no WPP, no WA-JS, no MsgStore, no getMessages polling.
+Telegram runtime: Telegram Web A concrete Message rows only; no left-list unread-preview pseudo messages; SPA message root rebinds when replaced.
+Teams runtime: concrete rendered message rows; no document.body fallback; never uses /v2/ as conversation ID; prefers Teams deep-link 19: chat id or DOM chat id, then title fallback.
+Signal runtime: unchanged RP01 Signal 8.17.0 rendered-DOM capture path from the known-working v6.1.1 base.
+Install cleanup removes stale MacTranslate injected collectors containing archiveCollectorStatus/getUserhash/MsgCollection/MsgStore errors before launching the new app.

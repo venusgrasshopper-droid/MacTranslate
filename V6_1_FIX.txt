@@ -1,0 +1,6 @@
+V6.1 fixes only the V6 verifier bootstrap bug:
+- Removed hard-coded /opt/nvm/... global TypeScript path.
+- Before dependencies are installed, TypeScript syntax precheck is skipped (the source mapping checks still run).
+- After the build installs project dependencies, RUN_ALL requires project-local TypeScript and performs the syntax check.
+- Message-recognition implementation is unchanged from V6.0.
+- RP01 frozen base and MacTr icon are unchanged.

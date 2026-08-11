@@ -1,0 +1,6 @@
+MacTranslate V6 消息识别源码依据（2026-08-07）
+
+WhatsApp: wppconnect-team/wa-js v4.4.2; WPP.loader.onReady; WPP.on/WPP.chat.on chat.new_message.
+Telegram: Ajaxy/telegram-tt (Web A); Message.tsx, MessageMeta.tsx, Chat.tsx, useChatListEntry, LastMessageMeta.
+Signal: exact vendored Signal Desktop 8.17.0 runtime in vendor/signal-runtime; rendered DOM only, read-only.
+Teams: Microsoft client is closed source; current DOM compatibility mapping cross-checked against public Teams exporter scripts; no claim of official internal event API.

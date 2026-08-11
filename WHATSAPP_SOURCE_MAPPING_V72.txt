@@ -1,0 +1,21 @@
+MacTranslate WhatsApp v7.2 source mapping
+
+Reference implementation: wwebjs/whatsapp-web.js release v1.34.7 (Apache-2.0)
+Repository: https://github.com/wwebjs/whatsapp-web.js
+Release used: v1.34.7 (latest release shown by GitHub on 2026-08-08: Apr 24, 2026)
+
+Mapped behavior:
+1. src/Client.js: provider collection is window.require('WAWebCollections').Msg.
+2. src/Client.js: new messages use Msg.on('add') and require msg.isNewMsg.
+3. src/Client.js: ciphertext placeholders are handled after change:type.
+4. src/structures/Message.js: text body is data.body, timestamp is data.t,
+   direction is data.id.fromMe, and chat identity resolves from from/to/remote.
+5. src/Client.js: current account identity is read from WAWebUserPrefsMeUser.
+
+MacTranslate adaptation is read-only:
+- no message sending
+- no placeholder resend mutation
+- no polling
+- no DOM message scanning
+- no media capture
+- no automatic sending

@@ -1,0 +1,45 @@
+extends: ./electron-builder.yml
+
+appId: "com.mactranslate.desktop"
+productName: "MacTranslate"
+executableName: "MacTranslate"
+
+protocols:
+  name: MacTranslate
+  schemes: [mactranslate]
+
+# The initial --dir package only needs Ferdium's normal unpacked assets.
+# Signal is inserted afterwards by assemble-trangpt-signal-layout.mjs, which
+# reconstructs the same app.asar / app.asar.unpacked split used by TranGPT.
+asarUnpack:
+  - "recipes/**/*"
+  - "assets/fonts/**/*"
+  - "assets/images/taskbar/**/*"
+  - "assets/images/icons/**/*"
+
+extraResources:
+  - from: SIGNAL_AGPL_NOTICE.md
+    to: SIGNAL_AGPL_NOTICE.md
+
+mac:
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  category: public.app-category.productivity
+  icon: ./build-helpers/images/icon.icns
+  darkModeSupport: true
+  entitlements: "./build-helpers/entitlements.mas.plist"
+  entitlementsInherit: "./build-helpers/entitlements.mas.inherit.plist"
+  notarize: false
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  artifactName: "MacTranslate-v12.4.3-${version}-${arch}.${ext}"
+  extendInfo:
+    NSCameraUsageDescription: "MacTranslate requires camera access for Signal and other video calls."
+    NSMicrophoneUsageDescription: "MacTranslate requires microphone access for Signal and other voice calls."
+    NSFocusStatusUsageDescription: "MacTranslate requires Focus access for Do Not Disturb integration."
+
+dmg:
+  artifactName: "MacTranslate-v12.4.3-${version}-${arch}.${ext}"

@@ -1,0 +1,17 @@
+MacTranslate v12.2 完整修正版源码
+
+已整合：
+1. 内嵌 Signal 双账号运行结构。
+2. 删除设置页无效 keepAllWorkspacesLoaded 字段引用。
+3. Electron 固定为 38.1.0，与 Signal 运行时一致。
+4. 删除无关的普通 Webview smoke test。
+5. 构建脚本自动检查并修复 7zip-bin ARM64 7za 缺失。
+
+构建：
+  cd ~/Downloads/MacTranslate-v12.2-complete-fixed-source
+  chmod +x scripts/build-macos-arm64.sh
+  ./scripts/build-macos-arm64.sh
+
+成功输出：
+  out/MacTranslate-v12.2-7.1.3-nightly.3-arm64.dmg
+  out/MacTranslate-v12.2-7.1.3-nightly.3-arm64.zip

@@ -1,0 +1,11 @@
+MacTranslate message-recognition v6.1.1 build fix
+
+Base: the user-supplied v6.1 complete-source ZIP.
+Fix only:
+- Removed unused legacy constant DOM_OBSERVER_FACTORY from UnifiedMessageRecognition.ts.
+- Added a source-verifier guard that rejects DOM_OBSERVER_FACTORY if it is reintroduced.
+
+No WhatsApp, Telegram, Signal, Teams capture bridge logic changed.
+No RP01 Signal host/runtime/session/partition/preload files changed.
+No recipes, MacTr icon, or macOS build pipeline files changed.
+Message schema/log directory remains MessageRecognitionV6 for continuity.

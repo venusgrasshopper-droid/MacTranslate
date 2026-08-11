@@ -1,0 +1,5 @@
+Signal 登录修复范围：
+1. 完整保留 TranGPT 3.1.178 中的 Signal 8.17.0 preload、wrapper、依赖和多账号数据目录结构。
+2. Signal WebContents 改为官方 Signal 8.x 使用的隔离宿主：contextIsolation=true、sandbox=false、nodeIntegration=false。
+3. 恢复官方后台节流和 Blink 配置；不会销毁后台账号，也不会删除账号登录状态。
+4. 本包只解决 Signal 启动/登录/首次同步，不新增或修改聊天归档采集器。

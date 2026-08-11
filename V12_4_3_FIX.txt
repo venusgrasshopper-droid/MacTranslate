@@ -1,0 +1,3 @@
+v12.4.3 changes exactly two runtime behaviors:
+1. When no workspace drawer exists, app content width is forced to 100% and translateX is reset to 0.
+2. Signal service wrappers keep Ferdium absolute stacking; the relative-position override that placed the second Signal one viewport below the first is removed.

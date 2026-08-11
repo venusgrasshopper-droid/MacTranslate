@@ -1,0 +1,7 @@
+Base: MT-12.4.3-SIGNAL-OK-RP01 + approved MacTr native macOS icon.
+V6 replaces only the failed message-recognition layer, its validation/report scripts, and documentation.
+Wire: out of scope.
+Signal host/runtime/session/partition/preload: frozen and unchanged.
+WhatsApp/Telegram/Teams recipes: frozen and unchanged.
+Telegram proven current-chat capture path is preserved; V6 fixes historical timestamp/optimistic duplicate handling and adds unread-chat preview capture.
+Real-account acceptance: only MessageRecognitionV6/messages.jsonl rows count as PASS.

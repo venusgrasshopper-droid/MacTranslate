@@ -1,0 +1,9 @@
+MacTranslate v12 embedded Signal source
+
+Build on Apple Silicon macOS:
+
+  cd ~/Downloads/MacTranslate-v12-embedded-Signal-source
+  chmod +x scripts/build-macos-arm64.sh
+  ./scripts/build-macos-arm64.sh
+
+The build creates DMG/ZIP only after the packaged two-account Signal QR smoke test passes.

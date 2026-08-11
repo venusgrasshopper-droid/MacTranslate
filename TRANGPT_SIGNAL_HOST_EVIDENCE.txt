@@ -1,0 +1,38 @@
+Signal 登录修复依据
+
+用户提供的 TranGPT 3.1.178 ARM64 DMG：
+- Signal runtime version: 8.17.0
+- Signal service preload: out/preload/servicePreloadSignal.js
+- Signal official wrapper: out/bundles/preload/wrapper.js
+
+TranGPT DMG 与本源码 vendor/signal-runtime 的关键文件 SHA-256 完全一致：
+- preload/servicePreloadSignal.js
+  209def51757da1fbd2a3e034df753edb89d4e397a9eb8de521a7c855a5cfb7b6
+- preload/js/index.js
+  e9ebf02eb0400c66fe0d8c6f98d9139e53e9f159cab761ccd45274bb0b590713
+- preload/js/index2.js
+  7432232ca0407c37f4c8190811bffc8abe41558611a32985b640a53d030ac4f5
+- preload/js/base64.js
+  d9b75d421d3f762c35285d53a71397e4de593e4d718ce5ff59ce1dc983e1e87a
+- bundles/preload/wrapper.js
+  83631d30a473801844dffc782e04d029a0de7dd0df155860df94fe4466898bee
+- bundles/preload/main.js
+  abcca323a64f17dacad623b67837a8b00d28410d86f2210a96c0ec903832bd45
+
+真实故障日志：
+- Signal bundle and preload started.
+- bundles:///preload/main.js then raised:
+  ReferenceError: Buffer is not defined
+  ReferenceError: process is not defined
+
+已定位差异：
+- 原 MacTranslate Signal WebContentsView: contextIsolation=false
+- Signal Desktop 8.x official host: contextIsolation=true, sandbox=false,
+  nodeIntegration=false, nodeIntegrationInWorker=false
+
+本修复：
+- 不修改 TranGPT Signal preload/wrapper/runtime.
+- 只修正 Signal WebContentsView host configuration.
+- Signal smoke probe moves to Electron isolated world 999.
+- Build rejects Buffer/process missing errors.
+- Does not modify any webpage service recipe or archive collector.

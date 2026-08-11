@@ -1,0 +1,20 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const services = ['whatsapp', 'telegram', 'signal', 'teams'];
+const labels = { whatsapp: 'WhatsApp', telegram: 'Telegram', signal: 'Signal', teams: 'Teams (DOM compatibility)' };
+const dataDir = path.join(os.homedir(), 'Library', 'Application Support', 'MacTranslate', 'MessageRecognitionV6');
+const output = path.join(os.homedir(), 'Downloads', 'MacTranslate-Real-Message-V6-Report.html');
+const readJsonl = file => { try { return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } }); } catch { return []; } };
+const messages = readJsonl(path.join(dataDir, 'messages.jsonl'));
+const statuses = readJsonl(path.join(dataDir, 'status.jsonl'));
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const counts = Object.fromEntries(services.map(service => [service, messages.filter(row => row.service === service).length]));
+const allPassed = services.every(service => counts[service] > 0);
+const recent = messages.slice(-1000).reverse();
+const recentStatus = statuses.slice(-1000).reverse();
+const cards = services.map(service => `<div class="card"><b>${esc(labels[service])}</b><div class="n ${counts[service] > 0 ? 'ok' : 'bad'}">${counts[service]}</div><div class="${counts[service] > 0 ? 'ok' : 'bad'}">${counts[service] > 0 ? 'PASS — real row captured' : 'NOT PASSED'}</div></div>`).join('');
+const html = `<!doctype html><meta charset="utf-8"><title>MacTranslate 真实消息识别 v6</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101416;color:#e9ecef;margin:0;padding:24px}.grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:12px}.card{background:#181e21;border:1px solid #364047;border-radius:12px;padding:16px;margin:12px 0}.n{font-size:32px}.ok{color:#70e083}.bad{color:#ff8e7a}.warn{color:#ffd166}.muted{color:#a8b0b6}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;text-align:left;vertical-align:top;border-bottom:1px solid #30393e}.text{white-space:pre-wrap;word-break:break-word;max-width:650px}</style><h1>MacTranslate 真实消息识别 v6</h1><p class="${allPassed?'ok':'bad'}">${allPassed?'四个平台均捕获到真实消息。':'只有 messages.jsonl 中的真实消息行才算 PASS；listener-installed / ready 不算。'}</p><div class="grid">${cards}</div><div class="card"><h2>真实消息</h2>${recent.length?`<table><tr><th>时间</th><th>时间来源</th><th>软件/实例</th><th>会话</th><th>方向</th><th>发送人</th><th>原文</th><th>来源</th></tr>${recent.map(x=>`<tr><td>${esc(new Date(x.sentAt).toLocaleString())}</td><td class="${String(x.timestampQuality).includes('observed')?'warn':'ok'}">${esc(x.timestampQuality==='observed-preview'?'observed-preview（仅预览观测时间，不是消息发送时间）':x.timestampQuality||'unknown')}</td><td>${esc(x.service)}<br>${esc(x.serviceInstanceId)}</td><td>${esc(x.conversationTitle||x.conversationId)}</td><td>${esc(x.direction)}</td><td>${esc(x.senderName||x.senderId)}</td><td class="text">${esc(x.text)}</td><td>${esc(x.providerEvent)}<br><span class="muted">${esc(x.idQuality)}</span></td></tr>`).join('')}</table>`:'<p class="bad">没有真实消息。</p>'}</div><div class="card"><h2>状态/诊断（不算成功）</h2><table><tr><th>时间</th><th>软件/实例</th><th>状态</th><th>详情</th></tr>${recentStatus.map(x=>`<tr><td>${esc(new Date(x.observedAt).toLocaleString())}</td><td>${esc(x.service)}<br>${esc(x.serviceInstanceId)}</td><td>${esc(x.status)}</td><td class="text">${esc(JSON.stringify(x.details||{}))}</td></tr>`).join('')}</table></div>`;
+fs.writeFileSync(output, html, 'utf8');
+console.log(output);

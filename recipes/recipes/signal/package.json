@@ -1,0 +1,17 @@
+{
+  "id": "signal",
+  "name": "Signal",
+  "version": "3.0.0",
+  "license": "AGPL-3.0-only",
+  "aliases": [
+    "signal",
+    "signal desktop",
+    "signal multi account"
+  ],
+  "config": {
+    "serviceURL": "about:blank",
+    "hasDirectMessages": false,
+    "hasIndirectMessages": false,
+    "hasNotificationSound": false
+  }
+}

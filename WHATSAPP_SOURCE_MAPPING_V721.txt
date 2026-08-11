@@ -1,0 +1,14 @@
+WhatsApp capture source mapping — v7.2.1
+
+Upstream: wwebjs/whatsapp-web.js
+Release checked: v1.34.7 (latest release shown by GitHub on 2026-08-08)
+Read-only integration points used by MacTranslate:
+- Client.inject(): waits for WhatsApp Web internals and socket sync.
+- Client.attachEventListeners(): window.require('WAWebCollections').Msg.on('add').
+- Msg add handler: requires msg.isNewMsg; ciphertext waits for msg.once('change:type').
+- Message._getChatId(): outgoing uses `to`, incoming uses `from`.
+- Message fields: id, body, type, t, from, to, author.
+
+MacTranslate deliberately does NOT copy whatsapp-web.js automation/browser control.
+It does NOT send, mutate, resend, poll message collections, or scan WhatsApp DOM.
+It only subscribes to the already-loaded WhatsApp Web Msg collection and records text messages.

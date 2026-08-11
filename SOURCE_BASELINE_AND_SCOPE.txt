@@ -1,0 +1,10 @@
+MacTranslate V6 baseline and scope
+
+Base: MT-12.4.3-SIGNAL-OK-RP01
+Frozen: Signal preload/host/session/partition/runtime; existing web recipes; original macOS build pipeline.
+Preserved: approved MacTr native macOS Dock/App icon.
+Removed from scope: Wire.
+Changed only: unified real-message recognition + its diagnostics/report/validation scripts.
+Targets: WhatsApp, Telegram Web A, Signal 8.17.0, Teams web compatibility.
+
+Real-account acceptance: only MessageRecognitionV6/messages.jsonl real message rows count as PASS. listener-installed/ready/static checks never count.

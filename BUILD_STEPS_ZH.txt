@@ -1,0 +1,4 @@
+cd ~/Downloads/MacTranslate
+./scripts/build-macos-arm64.sh
+
+只有出现 Build and Signal runtime smoke test passed. 才安装 out 目录中的 v9 DMG。

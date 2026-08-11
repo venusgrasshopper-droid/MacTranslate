@@ -1,0 +1,16 @@
+MacTranslate 图标单项修复
+恢复点：MT-12.4.3-SIGNAL-OK-RP01
+
+图标处理：
+- 使用用户上传的 MacTr 原图
+- 外形占 1024 画布的 82%，避免比其他 macOS 图标大一圈
+- 圆角比例 22.5%
+- 标准 16–1024px iconset
+- 新 ICNS 文件名用于绕过 Dock 旧缓存
+- 删除旧 Finder 自定义图标元数据，避免 Finder 与 Dock 图标不一致
+
+程序变更边界：
+- 不修改 Signal 代码
+- 不修改账号、Partition、数据库或归档
+- 不修改网页多账号底座
+- 仅修改图标资源、Info.plist 的 CFBundleIconFile 和本机应用签名

@@ -1,0 +1,8 @@
+package=@wppconnect/wa-js
+version=4.4.2
+repository=https://github.com/wppconnect-team/wa-js
+release=https://github.com/wppconnect-team/wa-js/releases/tag/v4.4.2
+license=Apache-2.0
+bundleBytes=503710
+bundleSha256=967209a61b8d2e218965e0a7ec168d8b96cf38eb31749ce0cd7ec9e91e806514
+vendorSource=exact WA-JS 4.4.2 bundle already embedded in RP01 TranGPT runtime

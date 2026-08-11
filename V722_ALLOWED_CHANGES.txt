@@ -1,0 +1,6 @@
+v7.2.2 intentionally changes only these areas beyond the v7.2.1 capture build:
+- WhatsApp recognition bridge: caches WAWebCollections, removes extra WAWebUserPrefsMeUser/WAWebSocketModel lookups, adds bounded already-loaded history snapshot (max 500; no loadEarlierMsgs paging).
+- recipes/recipes/whatsapp/webview.js: fixes error callback variable, IndexedDB rejection handling, body-ready guard.
+- recipes/recipes/telegram/webview.js: removes invalid window.onload(...) call and guards click event target.
+- src/webview/recipe.ts: defers autorun dark-mode update until documentElement/head/body exist.
+Telegram/Teams/Signal recognition bridges are byte-identical to v7.2.1. Signal runtime/host files remain unchanged.

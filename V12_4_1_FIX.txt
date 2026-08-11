@@ -1,0 +1,1 @@
+v12.4.1 changes only the combined smoke-test lifecycle: the hidden Signal host window is created before the homepage webview probe so destroying the probe cannot trigger window-all-closed and terminate the Signal test.
