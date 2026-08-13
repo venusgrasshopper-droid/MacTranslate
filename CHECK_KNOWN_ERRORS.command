@@ -20,6 +20,7 @@ check_absent 'legacy MsgStore error injector' 'MsgStore was not found' "$ROOT/sr
 check_absent 'Telegram invalid window.onload call' 'window\.onload\s*\(\s*\(\)\s*=>' "$ROOT/recipes/recipes/telegram"
 check_absent 'WhatsApp undefined error variable callback' "request\.addEventListener\('error',\s*\(\)\s*=>[\\s\\S]{0,180}Opening model-storage database failed:[^\\n]*event" "$ROOT/recipes/recipes/whatsapp"
 check_absent 'WhatsApp extra internal module lookups' "WAWebUserPrefsMeUser|WAWebSocketModel" "$ROOT/src/electron/message-recognition/UnifiedMessageRecognition.ts"
+check_absent 'TrustedHTML-unsafe style innerHTML assignment' '\.innerHTML\s*[-+]*=' "$ROOT/src/webview" "$ROOT/src/features/appearance"
 if (( failed )); then
   echo 'KNOWN_APP_ERROR_SOURCE=FOUND'
   exit 2

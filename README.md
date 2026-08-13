@@ -2,12 +2,15 @@
 
 MacTranslate is an open-source macOS desktop client for multi-account communication workflows. It is built on the Ferdium/Electron codebase and adds project-specific integrations for Telegram, Signal, WhatsApp and Microsoft Teams, with a focus on translation, real-message recognition and local text-message archiving.
 
-## Current baseline
+## Current public baseline
 
-- MacTranslate source line: v12.4.3 / RP01
-- Public baseline prepared from the 2026-08-11 stable root-cause-fix snapshot
-- Ferdium base: v7.1.3-nightly.3
-- Primary platform: macOS / Apple Silicon
+- MacTranslate: **v12.4.3**
+- Maintenance snapshot: **STABLE-UPSTREAM-CAPTURE-R16** (2026-08-13)
+- Ferdium base: **v7.1.3-nightly.3**
+- Electron: **38.1.0**
+- Primary platform: **macOS / Apple Silicon**
+
+R16 advances the capture/diagnostic line beyond the initial public snapshot. It includes live Telegram transport-state handling around the `tt-global` BroadcastChannel, runtime/HTTP status verification, persistence checks, and expanded service-specific regression tests.
 
 ## Project-specific work
 
@@ -22,23 +25,34 @@ MacTranslate extends the desktop host with:
 - WhatsApp integration based on pinned `@wppconnect/wa-js` APIs, with history/live-message handling and an Electron IPC archive bridge;
 - diagnostic and verification tooling for service-specific transport, runtime and capture failures.
 
-## Validation status
+## Validation approach
 
-Real-account runtime behavior is the acceptance criterion for message capture; listener installation or synthetic/mock events are not treated as proof that archival works.
+Real-account runtime behavior is the acceptance criterion for message capture. Listener installation, synthetic events, and mock-only tests are not treated as proof that archival works.
 
-Signal login/multi-account hosting and real-message recognition have been validated in the current RP01 line. Microsoft Teams real-message pickup has also been observed. WhatsApp source integration and runtime hooks are implemented, while final real-account archive validation remains active maintenance. Telegram currently has an Electron/WebSocket transport issue under investigation around `web.telegram.org` `/apiws`.
+The repository also contains deterministic regression tests and verification scripts so changes to Electron IPC, webview transport, service recipes, archive persistence and vendored runtimes can be reviewed before real-account validation.
 
 ## Security model
 
-MacTranslate has a larger attack surface than a normal desktop UI because it loads remote messaging applications inside Electron and connects them to local application capabilities. Security-sensitive boundaries include remote page content/webviews, preload scripts and Electron IPC, filesystem-backed archives, network/WebSocket transport, third-party service recipes, vendored dependencies, native modules, build scripts and third-party contributions.
+MacTranslate has a larger attack surface than a normal desktop UI because it loads remote messaging applications inside Electron and connects them to local application capabilities. Security-sensitive boundaries include:
+
+- remote page content and webviews;
+- preload scripts and Electron IPC;
+- filesystem-backed local archives;
+- network and WebSocket transport;
+- third-party service recipes;
+- vendored and pinned runtime dependencies;
+- native modules and build scripts;
+- third-party contributions.
 
 A compromised service page, dependency, recipe or contribution could attempt credential exfiltration, unauthorized network access, unsafe IPC calls, local file access, command execution or supply-chain modification. Security review therefore focuses on boundary validation, dependency provenance, least privilege and reproducible verification.
 
 No personal account database, chat archive, local log, authentication state, API key or user credential is intentionally committed to this repository.
 
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
 ## Upstream and third-party attribution
 
-MacTranslate is derived from Ferdium and retains the Apache-2.0 license and upstream attribution for Ferdium-derived source. The current baseline corresponds to Ferdium `v7.1.3-nightly.3`.
+MacTranslate is derived from Ferdium and retains the Apache-2.0 license and upstream attribution for Ferdium-derived source. The current base corresponds to Ferdium `v7.1.3-nightly.3`. The original upstream README is retained as [README_UPSTREAM_FERDIUM.md](README_UPSTREAM_FERDIUM.md).
 
 WhatsApp integration uses `@wppconnect/wa-js` and retains its upstream license/provenance. Embedded Signal-related components have separate source/provenance requirements; see `SIGNAL_AGPL_NOTICE.md` and related verification documentation where applicable.
 

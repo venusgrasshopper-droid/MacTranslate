@@ -9,7 +9,7 @@ const statuses=read(status).filter(x=>x.service==='whatsapp'&&x.status==='whatsa
 const done=statuses.at(-1);
 if(!done){console.log('HISTORY_SNAPSHOT=NOT PASSED');console.log('没有找到本次 WhatsApp 历史快照完成记录。');process.exit(2)}
 const end=Number(done.observedAt||0), start=end-60000;
-const rows=read(log).filter(x=>x.service==='whatsapp'&&x.providerEvent==='whatsapp-wawebcollections-history-snapshot'&&x.observedAt>=start&&x.observedAt<=end&&x.serviceInstanceId===done.serviceInstanceId);
+const rows=read(log).filter(x=>x.service==='whatsapp'&&(x.providerEvent==='whatsapp-wawebcollections-history-snapshot'||x.providerEvent==='whatsapp-local-db-msgfindbefore')&&x.observedAt>=start&&x.observedAt<=end&&x.serviceInstanceId===done.serviceInstanceId);
 const details=done.details||{};
 console.log(`HISTORY_SNAPSHOT=${Number(details.scanned)>0?'PASS':'EMPTY'} scanned=${details.scanned||0} captured=${details.captured||0} rows=${rows.length}`);
 console.log('STATUS='+JSON.stringify(details));

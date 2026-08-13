@@ -264,6 +264,14 @@ export const menuItems = defineMessages({
     id: 'menu.app.about',
     defaultMessage: 'About Ferdium',
   },
+  viewMessages: {
+    id: 'menu.app.viewMessages',
+    defaultMessage: 'View Messages',
+  },
+  exportMessages: {
+    id: 'menu.app.exportMessages',
+    defaultMessage: 'Export Messages...',
+  },
   checkForUpdates: {
     id: 'menu.app.checkForUpdates',
     defaultMessage: 'Check for updates',
@@ -919,6 +927,20 @@ class FranzMenu implements StoresProps {
           },
           enabled: this.stores.user.isLoggedIn,
           visible: !locked,
+        },
+        {
+          label: intl.formatMessage(menuItems.viewMessages),
+          visible: !locked,
+          click: () => {
+            void ipcRenderer.invoke('message-recognition:view-messages');
+          },
+        },
+        {
+          label: intl.formatMessage(menuItems.exportMessages),
+          visible: !locked,
+          click: () => {
+            void ipcRenderer.invoke('message-recognition:export-messages');
+          },
         },
         {
           label: intl.formatMessage(menuItems.checkForUpdates),

@@ -1,0 +1,3 @@
+R7_WHATSAPP_RESIDENT_HISTORY_FIX_OK
+Upstream basis: whatsapp-web.js Chat.fetchMessages() reads chat.msgs.getModelsArray() before calling WAWebChatLoadMessages.loadEarlierMsgs().
+Fix: capture every live chat's resident chat.msgs first, even when msgLoadState.noEarlierMsgs is already true; then keep R6 local/provider pagination.

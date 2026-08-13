@@ -168,7 +168,22 @@ export default class Service {
 
     this.recipe = recipe;
 
-    this.userAgentModel = new UserAgent(recipe.overrideUserAgent);
+    // teams-for-linux uses a Chrome-only UA because Teams Web is a browser app
+    // and branches on Electron product tokens. Keep the recipe frozen and apply
+    // the same compatibility rule at the service model boundary.
+    const userAgentOverride =
+      recipe.id === 'msteams'
+        ? () =>
+            (recipe.overrideUserAgent?.() || window.navigator.userAgent)
+              .replace(
+                /\s(?:Ferdium|Electron|MacTranslate)\/[^\s]+(?:\s+\([^)]*\))?/gi,
+                '',
+              )
+              .replace(/\s{2,}/g, ' ')
+              .trim()
+        : recipe.overrideUserAgent;
+
+    this.userAgentModel = new UserAgent(userAgentOverride);
 
     this.id = ifUndefined<string>(data.id, this.id);
     this.name = ifUndefined<string>(data.name, this.name);

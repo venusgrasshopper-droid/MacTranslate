@@ -1,0 +1,2 @@
+CHATVIEW_R2_FIX_OK
+Removed unused escapeMessageViewerHtml from src/index.ts after TypeScript TS6133 failure.

@@ -1,10 +1,24 @@
-MacTranslate V6 baseline and scope
+MacTranslate v12.4.3 public baseline and scope
 
-Base: MT-12.4.3-SIGNAL-OK-RP01
-Frozen: Signal preload/host/session/partition/runtime; existing web recipes; original macOS build pipeline.
-Preserved: approved MacTr native macOS Dock/App icon.
-Removed from scope: Wire.
-Changed only: unified real-message recognition + its diagnostics/report/validation scripts.
-Targets: WhatsApp, Telegram Web A, Signal 8.17.0, Teams web compatibility.
+Current public maintenance snapshot: STABLE-UPSTREAM-CAPTURE-R16 (2026-08-13)
+Recovery anchor: MT-12.4.3-SIGNAL-OK-RP01
+Upstream base: Ferdium v7.1.3-nightly.3
+Electron: 38.1.0
+Primary platform: macOS / Apple Silicon
 
-Real-account acceptance: only MessageRecognitionV6/messages.jsonl real message rows count as PASS. listener-installed/ready/static checks never count.
+Frozen/stability-sensitive areas:
+- Signal preload/host/session/partition/runtime remains frozen unless a reproducible Signal regression requires a targeted change.
+- Dependency pins are intentionally unchanged during the R16 public update.
+
+Active project scope:
+- Telegram Web A client workflow, translation layer, live tt-global transport-state handling and real-message history/capture.
+- WhatsApp real-message/history capture using verified upstream/reverse-module mechanisms and pinned WA-JS integration.
+- Microsoft Teams web compatibility and message pickup/history handling.
+- Signal isolated embedded runtime, multi-account hosting and real-message recognition.
+- Unified local text-message archival plus diagnostics, persistence checks and regression verification.
+
+Real-account acceptance:
+Only real text-message rows captured from authenticated runtime sessions count as PASS. listener-installed, ready, synthetic/mock-only, or static source checks do not count as final real-account validation.
+
+Public-repository safety:
+No personal account database, chat archive, session state, API key, token, credential or local log should be committed.

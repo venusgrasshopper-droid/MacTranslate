@@ -33,7 +33,10 @@ const contacts=new Map([[remote._serialized,{formattedName:'Alice Sender'}],[aut
 const envelopes=[]; const listeners={};
 const window={
   Debug:{VERSION:'2.3000.test'},
-  require(name){return name==='WAWebCollections'?{Msg,Chat:{get:k=>chats.get(k?._serialized||k)},Contact:{get:k=>contacts.get(k?._serialized||k)}}:undefined},
+  require(name){
+    if(name==='WATagsLogger') return {whenReady:()=>Promise.resolve()};
+    return name==='WAWebCollections'?{Msg,Chat:{get:k=>chats.get(k?._serialized||k)},Contact:{get:k=>contacts.get(k?._serialized||k)}}:undefined;
+  },
   addEventListener(name,cb){listeners[name]=cb}, removeEventListener(name){delete listeners[name]},
 };
 const context={
@@ -50,8 +53,8 @@ assert(rows.length===3,'expected 3 historical text rows, got '+rows.length);
 assert(rows.some(x=>x.text==='old direct'&&x.direction==='incoming'),'incoming history missing');
 assert(rows.some(x=>x.text==='old outgoing'&&x.direction==='outgoing'),'outgoing history missing');
 assert(rows.some(x=>x.text==='old group'&&x.senderId===author._serialized),'group history missing');
-assert(done?.details?.scanned===3,'history scanned count should filter non-text before scan');
+assert(done?.details?.scanned===4,'history scan should inspect all loaded provider models before text extraction');
 assert(done?.details?.captured===3,'history captured count mismatch');
-assert(!bridge.includes('.loadEarlierMsgs('),'bridge must not page network history');
+assert(bridge.includes("safeRequire('WAWebChatLoadMessages')"),'provider history completion module missing');
 console.log('WHATSAPP_HISTORY_V722_HARNESS_OK');
-console.log('loaded-history incoming/outgoing/group/text-filter/no-network-paging=PASS');
+console.log('loaded-history incoming/outgoing/group/media-text-extraction/provider-fallback-compatible=PASS');

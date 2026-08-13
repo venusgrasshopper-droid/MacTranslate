@@ -32,7 +32,7 @@ for(const x of ['archiveCollectorStatus','getUserhash','webview.mactranslate-bas
 for(const [name,part] of [['telegram',tg],['teams',teams],['signal',sig]]) if(!part.trim()) fail.push(name+' bridge missing');
 try {
   const require=createRequire(import.meta.url); let ts;
-  for(const c of [path.join(root,'node_modules/typescript/lib/typescript.js'),'/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript/lib/typescript.js','/usr/local/lib/node_modules/typescript/lib/typescript.js','/opt/homebrew/lib/node_modules/typescript/lib/typescript.js']) { try { ts=require(c); break; } catch {} }
+  try { ts=require(require.resolve('typescript',{paths:[root]})); } catch {}
   if(ts){
     const out=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS},reportDiagnostics:true,fileName:file});
     for(const d of out.diagnostics||[]) if(d.category===ts.DiagnosticCategory.Error) fail.push('TS '+ts.flattenDiagnosticMessageText(d.messageText,'\n'));

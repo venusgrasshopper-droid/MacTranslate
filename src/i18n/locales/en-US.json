@@ -131,6 +131,8 @@
   "menu.Todoss.openTodosDrawer": "Open Todos drawer",
   "menu.app.about": "About Ferdium",
   "menu.app.autohideMenuBar": "Auto-hide menu bar",
+  "menu.app.viewMessages": "View Messages",
+  "menu.app.exportMessages": "Export Messages...",
   "menu.app.checkForUpdates": "Check for updates",
   "menu.app.hide": "Hide",
   "menu.app.hideOthers": "Hide Others",

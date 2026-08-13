@@ -3,14 +3,17 @@
   "productName": "MacTranslate",
   "desktopName": "mactranslate.desktop",
   "appId": "com.mactranslate.desktop",
-  "version": "7.1.3-nightly.3",
-  "description": "Multi-account messaging desktop app for macOS with isolated embedded Signal accounts.",
-  "author": "Ferdium Contributors <hello@ferdium.org> (https://ferdium.org/)",
+  "version": "12.4.3",
+  "description": "Open-source macOS multi-account messaging client with translation, real-message recognition, and local text-message archiving.",
+  "author": "venusgrasshopper-droid",
   "license": "Apache-2.0",
   "copyright": "MacTranslate",
   "main": "index.js",
-  "homepage": "https://github.com/ferdium/ferdium-app",
-  "repository": "https://github.com/ferdium/ferdium-app.git",
+  "homepage": "https://github.com/venusgrasshopper-droid/MacTranslate",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/venusgrasshopper-droid/MacTranslate.git"
+  },
   "private": true,
   "engines": {
     "node": ">=22.18.0 <23",
@@ -250,5 +253,8 @@
   ],
   "autoload": {
     "App": "./src/internal-server/app"
+  },
+  "bugs": {
+    "url": "https://github.com/venusgrasshopper-droid/MacTranslate/issues"
   }
 }

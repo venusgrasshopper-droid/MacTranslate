@@ -23,7 +23,7 @@ export const injectDarkModeStyle = (recipePath: string) => {
     const data = readFileSync(darkmodeCss);
     const styles = document.createElement('style');
     styles.id = ID;
-    styles.innerHTML = data.toString();
+    styles.textContent = data.toString();
     debug('Loaded darkmode.css from: ', darkmodeCss);
 
     document.querySelector('head')?.append(styles);

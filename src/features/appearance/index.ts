@@ -27,7 +27,7 @@ const setAppearance = style => {
   const styleElement = document.querySelector(`#${STYLE_ELEMENT_ID}`);
 
   if (styleElement) {
-    styleElement.innerHTML = style;
+    styleElement.textContent = style;
   }
 };
 

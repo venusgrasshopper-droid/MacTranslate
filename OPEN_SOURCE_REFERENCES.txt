@@ -1,6 +1,37 @@
-MacTranslate V6 消息识别源码依据（2026-08-07）
+MacTranslate v12.4.3 消息拾取源码依据（2026-08-12）
 
-WhatsApp: wppconnect-team/wa-js v4.4.2; WPP.loader.onReady; WPP.on/WPP.chat.on chat.new_message.
-Telegram: Ajaxy/telegram-tt (Web A); Message.tsx, MessageMeta.tsx, Chat.tsx, useChatListEntry, LastMessageMeta.
-Signal: exact vendored Signal Desktop 8.17.0 runtime in vendor/signal-runtime; rendered DOM only, read-only.
-Teams: Microsoft client is closed source; current DOM compatibility mapping cross-checked against public Teams exporter scripts; no claim of official internal event API.
+验证等级：
+- OFFICIAL = 平台官方开源客户端源码
+- THIRD_PARTY_LIVE = 第三方项目基于真实网页/API 的公开实现（平台网页本身未开源）
+- REVERSE_MODULE = 公开提取/逆向的网页内部模块（平台网页本身未开源）
+
+Signal [OFFICIAL]
+- signalapp/Signal-Desktop v8.17.0（与 vendor/signal-runtime/package.json 精确同版本）
+- ts/models/conversations.preload.ts
+  loadNewestMessages() / loadOlderMessages() -> 本地 DataReader.getOlderMessagesByConversation 分页。
+- ts/state/initializeRedux.preload.ts
+  window.reduxActions.conversations 是 bindActionCreators 生成的普通 action 对象。
+- MacTranslate 不修改 vendor/signal-runtime；只在隔离 world 临时截获 messagesReset/messagesAdded 的页面数据，然后恢复原函数。
+
+Telegram [OFFICIAL]
+- Ajaxy/telegram-tt
+- src/api/gramjs/methods/chats.ts: fetchChats() -> messages.GetDialogs 分页。
+- src/api/gramjs/methods/messages.ts: fetchMessages() -> messages.GetHistory（MAIN_THREAD_ID）。
+- src/util/browser/multitab.ts + src/api/gramjs/worker/connector.ts: tt-global BroadcastChannel callApi/messageResponse。
+- src/api/types/messages.ts: MAIN_THREAD_ID = -1。
+
+Teams [THIRD_PARTY_LIVE]
+- Microsoft Teams Web 客户端源码未公开；不宣称微软官方源码。
+- gediz/teams-web-chat-exporter commit ca606d2a9edcf07403986f58588f62a6c50e8b56
+- src/content/teams-state.ts: Teams:conversation-manager IndexedDB 枚举完整会话列表。
+- src/content/api-client.ts: Chat Service /messages?pageSize=200 + _metadata.backwardLink 分页；每页重新读取 token；429/403/5xx/网络重试；Teams Free chatsvc/consumer 鉴权格式。
+- src/utils/teams-urls.ts: Microsoft API host allow-list。
+
+WhatsApp [REVERSE_MODULE]
+- Meta/WhatsApp Web 源码未公开；不宣称 Meta 官方源码。
+- vinikjkkj/wa-diff commit 852847472e6c3c1100cbaf68d7e958a0de9db7a7
+- files/WAWebSchemaChat.js: WAWebSchemaChat.getChatTable().all()。
+- files/WAWebWidFactory.js: createWid()。
+- files/WAWebDBMessageFindLocal.js: msgFindBefore() 本地消息查询。
+- files/WAWebExportChatAction.js: WhatsApp 自己的导出路径：初始 anchor={remote:chat.id}，count=50，下一页 anchor=messages[0].id，默认 100000 条/会话安全上限。
+- MacTranslate 按这一原生 ExportChat 本地分页模式读取，不调用 loadEarlierMsgs/network history。

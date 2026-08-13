@@ -1,0 +1,41 @@
+MacTranslate v12.4.3 - message capture upstream audit
+Checked: 2026-08-11
+
+Telegram Web A
+Repository: Ajaxy/telegram-tt
+Verified upstream mechanisms:
+- src/api/gramjs/methods/chats.ts: fetchChats() -> messages.GetDialogs/GetPinnedDialogs, returns chats + pagination offsets.
+- src/api/gramjs/methods/messages.ts: fetchMessages() -> messages.GetHistory when threadId === MAIN_THREAD_ID.
+- src/api/types/messages.ts: MAIN_THREAD_ID = -1.
+- src/util/browser/multitab.ts: tt-global BroadcastChannel callApi/messageResponse transport.
+MacTranslate implementation: enumerate dialogs through fetchChats, then page each conversation with fetchMessages over Telegram's own callApi channel. tt-data cache is no longer treated as complete history.
+
+Microsoft Teams
+Repository: gediz/teams-web-chat-exporter
+Verified upstream mechanisms:
+- src/content/teams-state.ts: conversation-manager IndexedDB is used to enumerate local conversations; replychain-manager is sender/name metadata, not authoritative complete history.
+- src/content/api-client.ts: fetchAllMessages() uses the Teams Chat Service messages endpoint and follows _metadata.backwardLink.
+- Teams Free uses https://teams.live.com/api/chatsvc/consumer and authentication: skypetoken=<token>, with the cached .Discover.SKYPE-TOKEN AES-CBC flow.
+MacTranslate implementation: conversation-manager enumerates conversations; message bodies come from Chat Service API backwardLink paging. replychain-manager is no longer archived as complete history.
+
+WhatsApp Web
+Repository snapshot: vinikjkkj/wa-diff
+Verified upstream modules:
+- WAWebSchemaChat.js: local chat table.
+- WAWebSchemaMessage.js: local message table.
+- WAWebDBMessageSerialization: DB row -> message model serialization/decryption path.
+- WAWebDBMessageFindLocal.js: msgFindBefore/msgFindAfter/msgFindByDirection.
+MacTranslate implementation: full local message table scan first; msgFindBefore is fallback only. No loadEarlierMsgs network paging.
+
+Signal Desktop
+Repository: signalapp/Signal-Desktop
+Verified upstream mechanisms:
+- ts/models/conversations.preload.ts: ConversationModel.loadNewestMessages() and loadOlderMessages(oldestMessageId).
+- loadOlderMessages internally reads getOlderMessagesByConversation() and feeds messagesAdded() into Redux.
+MacTranslate implementation: read-only isolated preload-world history prime using Signal's own ConversationModel local SQL paging, then snapshot messagesLookup/messagesByConversation. Signal host/session/partition runtime remains frozen.
+
+R13 Telegram live-state correction
+- Ajaxy/telegram-tt src/global/cache.ts reduceGlobal() does not persist connectionState.
+- Ajaxy/telegram-tt src/util/browser/multitab.ts broadcasts live GlobalState changes on DATA_BROADCAST_CHANNEL_NAME using globalDiffUpdate/globalUpdate.
+- MacTranslate therefore gates fetchChats/fetchMessages from live tt-global BroadcastChannel connectionState, not tt-global-state IndexedDB cache.
+- Normal reconnect aborts only MacTranslate pending history waiters and retries after connectionStateReady remains stable for 8 seconds; it does not force HTTP or inject apiw1 CORS.

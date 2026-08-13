@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+const root=process.argv[2]||process.cwd();
+const rec=fs.readFileSync(path.join(root,'src/electron/message-recognition/UnifiedMessageRecognition.ts'),'utf8');
+const service=fs.readFileSync(path.join(root,'src/models/Service.ts'),'utf8');
+const index=fs.readFileSync(path.join(root,'src/index.ts'),'utf8');
+const fail=m=>{console.error('R14_VERIFY_FAIL '+m);process.exit(1)};
+if(!rec.includes("settings.shouldAllowHttpTransport=true"))fail('allow HTTP missing');
+if(!rec.includes("settings.shouldForceHttpTransport=Boolean(force)"))fail('upstream force HTTP setting missing');
+if(!rec.includes("telegram-force-http-confirmed"))fail('force confirmation missing');
+if(!rec.includes("telegram-force-http-reverted"))fail('force watchdog revert missing');
+if(!rec.includes("writeTransportSettings(false"))fail('fallback restore missing');
+if(!rec.includes("data.type==='globalDiffUpdate'"))fail('live globalDiffUpdate listener missing');
+if(!rec.includes("data.type==='globalUpdate'"))fail('live globalUpdate listener missing');
+if(!rec.includes("Date.now()-state.readySince>=8000"))fail('stable ready gate missing');
+if(rec.includes("configureTelegramHttpCors")||rec.includes("scoped-apiw1-response-header")||rec.includes("https://*.web.telegram.org/apiw1*"))fail('CORS injection remains');
+if(service.includes('configureTelegramHttpCors')||index.includes('configureTelegramHttpCors'))fail('main/service CORS injection remains');
+if(/window\.WebSocket\s*=|window\.Worker\s*=|WebSocket\.prototype|Worker\.prototype/.test(rec))fail('WebSocket/Worker monkeypatch found');
+console.log('TELEGRAM_R14_ADAPTIVE_TRANSPORT_VERIFY_OK');
+console.log('upstream-force-http/no-cors-injection/live-ready-watchdog-revert=PASS');

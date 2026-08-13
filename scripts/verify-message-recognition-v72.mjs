@@ -14,8 +14,11 @@ for(const required of [
   "safeRequire('WAWebCollections')",
   "Msg.on('add', state.addHandler)",
   "msg.isNewMsg !== true",
-  "clean(msg.type) !== 'chat'",
   "conversationId === 'status@broadcast'",
+  "safeRequire('WAWebMsgGetters')",
+  "safeRequire('WAWebMsgModelFromData')",
+  'getCaption',
+  'getPollName',
   "adapter: 'whatsapp-webjs-msg-add-readonly-v722'",
   "state.collections = collections",
   "msg.once('change:type'",
@@ -26,14 +29,23 @@ for(const required of [
 const tg=slice('const TELEGRAM_BRIDGE','const TEAMS_BRIDGE');
 const teams=slice('const TEAMS_BRIDGE','const SIGNAL_BRIDGE');
 const sig=slice('const SIGNAL_BRIDGE','function scriptFor');
-for(const x of ['last-message-summary','telegram-web-a-unread-chat-preview','ChatBadge.unread']) if(tg.includes(x)) fail.push('Telegram changed into pseudo path: '+x);
+for(const x of ['last-message-summary']) if(tg.includes(x)) fail.push('Telegram changed into pseudo path: '+x);
+for(const required of ["telegramChannelName = () => 'tt-global_'","telegramCallApi('fetchChats'","telegramCallApi('fetchMessages'",'threadId:-1','telegram-web-a-api-fetchMessages',"document.querySelector('#LeftColumn')",'.ChatBadge.unread:not(.muted)']) if(!tg.includes(required)) fail.push('Telegram native API history missing: '+required);
 if(teams.includes('document.body || null')) fail.push('Teams body fallback returned');
 if(teams.includes('location.pathname + location.search + location.hash')) fail.push('Teams /v2/ id returned');
 for(const x of ['archiveCollectorStatus','getUserhash','webview.mactranslate-base.js','WAWebUserPrefsMeUser','WAWebSocketModel']) if(source.includes(x)) fail.push('legacy symbol: '+x);
+for(const required of ['RECOGNITION_RUN_ID = randomUUID()', "'current-run.json'", 'recognitionRunId: RECOGNITION_RUN_ID', 'beginRecognitionRun = () =>']) if(!source.includes(required)) fail.push('current-run proof missing: '+required);
 for(const [name,part] of [['telegram',tg],['teams',teams],['signal',sig]]) if(!part.trim()) fail.push(name+' bridge missing');
+for(const required of ['normalizedTeamsTitle','directionOf = node','teams-title:',"senderName: outgoing ? '' : senderName","teamsDbNames('conversation-manager')",'fetchTeamsHistory','data?._metadata?.backwardLink','refreshTeamsMessagingAuth','networkRetries<1','isTeamsChatServiceHistoryEligible','teams-chat-service-api',".Discover.SKYPE-TOKEN"]) if(!teams.includes(required)) fail.push('Teams API history missing: '+required);
+
+if(tg.includes('telegram-web-a-idb-last-message-cache')) fail.push('Telegram obsolete cache-as-history path returned');
+if(teams.includes('teams-local-replychain-idb')) fail.push('Teams obsolete replychain-as-history path returned');
+for(const required of ['SIGNAL_HISTORY_PRIME_SCRIPT','loadNewestMessages(undefined, true)','loadOlderMessages(oldestId)','actions.messagesAdded = wrappedAdded','actions.messagesReset = wrappedReset','signal-local-history-primed','SIGNAL_CACHE_SNAPSHOT_SCRIPT','messagesLookup','messagesByConversation','executeJavaScriptInIsolatedWorld(999','signal-8.17.0-local-sql-history','signal-8.17.0-redux-cache-live']) if(!source.includes(required)) fail.push('Signal cache capture missing: '+required);
+for(const required of ["safeRequire('WAWebDBMessageFindLocal')","safeRequire('WAWebSchemaChat')","safeRequire('WAWebWidFactory')",'finder.msgFindBefore({ anchor, count: PAGE_SIZE })','let anchor = { remote: chat.remote }','const PAGE_SIZE = 50','const MAX_PER_CHAT = 100000','whatsapp-native-exportchat-local-history',"safeRequire('WAWebChatLoadMessages')",'loader.loadEarlierMsgs({ chat })','whatsapp-wawebchatloadmessages-history','whatsapp-chat-resident-history','modelsOf(chat?.msgs)',"safeRequire('WAWebApiChatBulkGetByHistory')",'bulkGetChatsMaybeByHistory','whatsapp-chat-msgs-history-add']) if(!wa.includes(required)) fail.push('WhatsApp native local history missing: '+required);
+if(wa.includes('messageTable.all()')) fail.push('WhatsApp raw full message-table scan returned');
 try {
   const require=createRequire(import.meta.url); let ts;
-  for(const c of [path.join(root,'node_modules/typescript/lib/typescript.js'),'/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript/lib/typescript.js','/usr/local/lib/node_modules/typescript/lib/typescript.js','/opt/homebrew/lib/node_modules/typescript/lib/typescript.js']) { try { ts=require(c); break; } catch {} }
+  try { ts=require(require.resolve('typescript',{paths:[root]})); } catch {}
   if(ts){
     const out=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS},reportDiagnostics:true,fileName:file});
     for(const d of out.diagnostics||[]) if(d.category===ts.DiagnosticCategory.Error) fail.push('TS '+ts.flattenDiagnosticMessageText(d.messageText,'\n'));

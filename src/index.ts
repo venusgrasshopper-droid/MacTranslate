@@ -1,6 +1,7 @@
 /* eslint-disable import/first */
 
 import { EventEmitter } from 'node:events';
+import { copyFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   BrowserWindow,
@@ -10,6 +11,7 @@ import {
   globalShortcut,
   ipcMain,
   session,
+  shell,
 } from 'electron';
 
 import { initialize } from 'electron-react-titlebar/main';
@@ -44,7 +46,9 @@ import { prepareEmbeddedSignalBeforeReady } from './electron/signal/EmbeddedSign
 import runEmbeddedSignalSmokeTest from './electron/signal/runEmbeddedSignalSmokeTest';
 // eslint-disable-next-line import/no-cycle
 import ipcApi from './electron/ipc-api';
-import registerUnifiedMessageRecognition from './electron/message-recognition/UnifiedMessageRecognition';
+import registerUnifiedMessageRecognition, {
+  recognitionDirectory,
+} from './electron/message-recognition/UnifiedMessageRecognition';
 import isPositionValid from './electron/windowUtils';
 import { mainIpcHandler as basicAuthHandler } from './features/basicAuth';
 import DBus from './lib/DBus';
@@ -274,67 +278,98 @@ const createWindow = () => {
       if (!(ses as any)._permissionHandlersSet) {
         (ses as any)._permissionHandlersSet = true;
 
-        const isWhatsAppOrigin = (value?: string) => {
-          if (!value) return false;
+        const isWhatsAppOrigin = (value: string): boolean => {
           try {
-            return new URL(value).hostname.toLowerCase() === 'web.whatsapp.com';
+            return new URL(value).origin === 'https://web.whatsapp.com';
           } catch {
             return false;
           }
         };
 
-        ses.setPermissionRequestHandler((webContents, permission, callback) => {
-          const permissionName = String(permission);
-          const requestingUrl = webContents?.getURL() || '';
-
-          // Electron 38 maps Blink DURABLE_STORAGE (navigator.storage.persist())
-          // to the permission string "persistent-storage". WhatsApp requests it
-          // during startup; denying it produces acquire-persistent-storage-denied.
-          if (
-            permissionName === 'persistent-storage' &&
-            isWhatsAppOrigin(requestingUrl)
-          ) {
-            callback(true);
-            return;
-          }
-
-          const allowedPermissions: string[] = [
-            'media',
-            'notifications',
-            'fullscreen',
-            'pointerLock',
-            'display-capture',
-            'idle-detection',
-            'clipboard-read',
-            'clipboard-sanitized-write',
-            'speaker-selection',
-          ];
-
-          if (allowedPermissions.includes(permissionName)) {
-            callback(true);
-            return;
-          }
-
-          debug(
-            `Denied permission request: ${permissionName} from ${requestingUrl}`,
-          );
-          callback(false);
-        });
-
-        ses.setPermissionCheckHandler(
-          (webContents, permission, requestingOrigin) => {
+        ses.setPermissionRequestHandler(
+          (webContents, permission, callback, details) => {
+            const allowedPermissions = [
+              'media',
+              'notifications',
+              'fullscreen',
+              'pointerLock',
+              'display-capture',
+              'idle-detection',
+              'clipboard-read',
+              'clipboard-sanitized-write',
+              'speaker-selection',
+            ];
             const permissionName = String(permission);
             const requestingUrl =
-              requestingOrigin || webContents?.getURL() || '';
+              (details as { requestingUrl?: string })?.requestingUrl ||
+              webContents?.getURL() ||
+              '';
 
+            // Chromium maps durable storage to Electron's
+            // `persistent-storage` permission. WhatsApp calls
+            // navigator.storage.persist() during its own bootstrap; deny it
+            // and WhatsApp reports acquire-persistent-storage-denied.
             if (
               permissionName === 'persistent-storage' &&
               isWhatsAppOrigin(requestingUrl)
             ) {
-              return true;
+              callback(true);
+              return;
             }
 
-            const allowedChecks: string[] = [
+            if (allowedPermissions.includes(permissionName)) {
+              callback(true);
+              return;
+            }
+
+            debug(
+              `Denied permission request: ${permissionName} from ${requestingUrl}`,
+            );
+            callback(false);
+          },
+        );
+
+        // WhatsApp's closed web bundle uploads internal non-fatal crash logs to
+        // crashlogs.whatsapp.net. Some of those telemetry uploads currently
+        // return HTTP 400 even while the app continues normally, which Chromium
+        // surfaces as a red Failed to load resource entry. Electron supports
+        // overriding the response status line in onHeadersReceived. Normalize
+        // only that telemetry endpoint's 400 response; never touch WhatsApp API,
+        // media, websocket, or MacTranslate traffic.
+        ses.webRequest.onHeadersReceived(
+          { urls: [
+            'https://crashlogs.whatsapp.net/*',
+            'https://teams.live.com/v2/manifest.json',
+          ] },
+          (details, callback) => {
+            const requestUrl = details.url || '';
+            if (
+              requestUrl.startsWith('https://crashlogs.whatsapp.net/') &&
+              details.statusCode === 400
+            ) {
+              callback({
+                responseHeaders: details.responseHeaders || {},
+                statusLine: 'HTTP/1.1 200 OK',
+              });
+              return;
+            }
+            if (
+              requestUrl === 'https://teams.live.com/v2/manifest.json' &&
+              details.statusCode === 404
+            ) {
+              callback({
+                responseHeaders: {},
+                statusLine: 'HTTP/1.1 204 No Content',
+              });
+              return;
+            }
+            callback({});
+          },
+        );
+
+        ses.setPermissionCheckHandler(
+          (_webContents, permission, requestingOrigin) => {
+            const allowedChecks = [
               'media',
               'notifications',
               'fullscreen',
@@ -348,6 +383,14 @@ const createWindow = () => {
               'usb',
               'speaker-selection',
             ];
+            const permissionName = String(permission);
+
+            if (
+              permissionName === 'persistent-storage' &&
+              isWhatsAppOrigin(requestingOrigin || '')
+            ) {
+              return true;
+            }
 
             return allowedChecks.includes(permissionName);
           },
@@ -677,6 +720,290 @@ app.on('login', (event, _webContents, _request, authInfo, callback) => {
   }
 });
 
+const recognitionMessageFile = () =>
+  join(recognitionDirectory(), 'messages.jsonl');
+
+let messageViewerWindow: BrowserWindow | undefined;
+
+const readRecognizedMessagesForViewer = (): Array<Record<string, unknown>> => {
+  const file = recognitionMessageFile();
+  ensureFileSync(file);
+  const raw = readFileSync(file, 'utf8');
+  const rows: Array<Record<string, unknown>> = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === 'object') rows.push(parsed);
+    } catch {
+      // Keep a malformed line from breaking the whole viewer.
+    }
+  }
+  return rows;
+};
+
+const buildMessageViewerHtml = (): string => {
+  const rows = readRecognizedMessagesForViewer();
+  const serializedRows = JSON.stringify(rows)
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e')
+    .replaceAll('&', '\\u0026');
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MacTranslate 消息记录</title>
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;--bg:#f5f5f7;--panel:#fff;--line:rgba(60,60,67,.16);--muted:#6e6e73;--accent:#0a84ff;--incoming:#e9e9eb;--outgoing:#0a84ff;--outgoingText:#fff;--hover:rgba(0,0,0,.05)}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--panel:#1c1c1e;--line:rgba(235,235,245,.16);--muted:#98989d;--incoming:#2c2c2e;--hover:rgba(255,255,255,.06)}}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:CanvasText;overflow:hidden}
+.app{height:100%;min-height:0;overflow:hidden;display:grid;grid-template-rows:auto minmax(0,1fr)}.topbar{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+.titleblock{min-width:210px}.title{font-size:18px;font-weight:700}.summary{font-size:11px;color:var(--muted);margin-top:2px;white-space:nowrap}.controls{display:flex;gap:8px;flex:1;justify-content:flex-end}
+input,select{height:34px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:inherit;padding:0 10px;font:inherit;font-size:13px;outline:none}input{width:min(360px,38vw)}input:focus,select:focus{border-color:var(--accent)}
+.main{min-height:0;overflow:hidden;display:grid;grid-template-columns:300px minmax(0,1fr)}.sidebar{min-width:0;min-height:0;border-right:1px solid var(--line);background:var(--panel);overflow-y:auto;overflow-x:hidden}.conversation{padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer}.conversation:hover{background:var(--hover)}.conversation.active{background:color-mix(in srgb,var(--accent) 12%,var(--panel))}
+.convTop{display:flex;align-items:center;gap:8px}.service{font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:.4px;color:var(--accent);flex:0 0 auto}.convTitle{font-size:13px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.count{font-size:11px;color:var(--muted)}.preview{font-size:12px;color:var(--muted);margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.convTime{font-size:10px;color:var(--muted);margin-top:4px}
+.content{min-width:0;min-height:0;overflow:hidden;display:grid;grid-template-rows:auto minmax(0,1fr);background:var(--bg)}.contentHead{padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;align-items:center;gap:10px}.contentTitle{font-size:14px;font-weight:700}.contentMeta{font-size:11px;color:var(--muted)}
+.messages{min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding:18px 22px 30px}.day{display:flex;justify-content:center;margin:12px 0}.day span{font-size:10px;color:var(--muted);background:var(--panel);border:1px solid var(--line);padding:3px 8px;border-radius:999px}
+.row{display:flex;margin:7px 0}.row.outgoing{justify-content:flex-end}.msgWrap{max-width:min(720px,78%)}.sender{font-size:10px;color:var(--muted);margin:0 8px 3px}.row.outgoing .sender{text-align:right}.bubble{font-size:13px;line-height:1.42;white-space:pre-wrap;word-break:break-word;border-radius:15px;padding:8px 11px;background:var(--incoming)}.row.outgoing .bubble{background:var(--outgoing);color:var(--outgoingText)}.time{font-size:9px;color:var(--muted);margin:3px 8px 0}.row.outgoing .time{text-align:right}
+.empty{height:100%;display:grid;place-items:center;color:var(--muted);font-size:13px;padding:30px;text-align:center}.mark{background:#ffd60a;color:#000;border-radius:2px;padding:0 1px}
+@media(max-width:760px){.main{grid-template-columns:220px 1fr}.titleblock{display:none}.controls{justify-content:stretch}input{width:100%;min-width:0}.msgWrap{max-width:90%}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="titleblock"><div class="title">消息记录</div><div class="summary" id="summary"></div></div>
+    <div class="controls">
+      <input id="search" type="search" placeholder="搜索发送者、会话或消息…" autocomplete="off">
+      <select id="service"><option value="all">全部平台</option></select>
+      <select id="direction"><option value="all">全部方向</option><option value="incoming">收到</option><option value="outgoing">发出</option></select>
+    </div>
+  </div>
+  <div class="main">
+    <aside class="sidebar" id="sidebar"></aside>
+    <section class="content">
+      <div class="contentHead"><div class="contentTitle" id="contentTitle">选择会话</div><div class="contentMeta" id="contentMeta"></div></div>
+      <div class="messages" id="messages"><div class="empty">暂无真实消息</div></div>
+    </section>
+  </div>
+</div>
+<script id="message-data" type="application/json">${serializedRows}</script>
+<script>
+(function(){
+  const raw = JSON.parse(document.getElementById('message-data').textContent || '[]');
+  const text = v => String(v == null ? '' : v);
+  const normalized = raw.map((r,i) => ({
+    _i:i,
+    service:text(r.service || 'unknown').toLowerCase(),
+    direction:r.direction === 'outgoing' ? 'outgoing' : 'incoming',
+    ts:Number(r.sentAt ?? r.observedAt ?? 0) || 0,
+    sender:text(r.senderName || r.senderId || (r.direction === 'outgoing' ? '我' : '未知发送者')),
+    senderId:text(r.senderId || ''),
+    conversation:text(r.conversationTitle || r.conversationId || '未命名会话'),
+    conversationId:text(r.conversationId || r.conversationTitle || 'unknown'),
+    messageId:text(r.providerMessageId || r.messageId || ''),
+    observedAt:Number(r.observedAt || 0) || 0,
+    timestampQuality:text(r.timestampQuality || ''),
+    providerEvent:text(r.providerEvent || ''),
+    body:text(r.text || '')
+  })).filter(m => !(m.service === 'signal' && m.providerEvent === 'signal-8.17.0-rendered-dom-readonly'));
+
+  const normalizedTitle = v => text(v).normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF\uFE0F]/g,'').replace(/\s+/g,' ').trim().replace(/[.·•]+$/g,'').trim().toLocaleLowerCase();
+  const archiveConversationKey = m => m.service === 'teams' && normalizedTitle(m.conversation)
+    ? 'teams-title:' + normalizedTitle(m.conversation)
+    : m.conversationId;
+
+  // Provider IDs are authoritative. When a newer build re-captures the same
+  // message with corrected direction/sender metadata, show the newest record
+  // instead of preserving the old bad row forever.
+  const latestByIdentity = new Map();
+  const providerIdsGlobalPerAccount = new Set(['signal','whatsapp']);
+  for (const m of normalized) {
+    // Signal UUID message ids and WhatsApp serialized stanza ids are provider-global
+    // inside the active account. Older builds sometimes attached the correct provider
+    // id to a wrong/derived conversation id; let the newest canonical recapture replace
+    // that stale row instead of creating a duplicate conversation in the viewer.
+    const idKey = m.messageId
+      ? JSON.stringify(providerIdsGlobalPerAccount.has(m.service)
+          ? [m.service,m.messageId]
+          : [m.service,archiveConversationKey(m),m.messageId])
+      : JSON.stringify([m.service,archiveConversationKey(m),m.ts,m.body]);
+    const previous = latestByIdentity.get(idKey);
+    if (!previous || (m.observedAt || m._i) >= (previous.observedAt || previous._i)) latestByIdentity.set(idKey,m);
+  }
+  // Old builds sometimes assigned a derived provider id and wrong Teams direction.
+  // Reconcile the same timestamp+body inside one canonical conversation by newest
+  // observation too, so a corrected recapture replaces the stale bad row in view.
+  const latestBySemantic = new Map();
+  for (const m of latestByIdentity.values()) {
+    const semanticKey = JSON.stringify([m.service,archiveConversationKey(m),m.ts,m.body]);
+    const previous = latestBySemantic.get(semanticKey);
+    if (!previous || (m.observedAt || m._i) >= (previous.observedAt || previous._i)) latestBySemantic.set(semanticKey,m);
+  }
+  const seen = new Set();
+  const rows = [];
+  for (const m of latestBySemantic.values()) {
+    const key = JSON.stringify([m.service,m.direction,m.ts,m.senderId || m.sender,archiveConversationKey(m),m.body]);
+    if (seen.has(key)) continue;
+    seen.add(key); rows.push(m);
+  }
+  // If an unread Telegram preview was later captured as a real provider message,
+  // hide the preview duplicate in the viewer but keep the raw archive untouched.
+  const realSemantic = new Set(rows.filter(m=>m.timestampQuality!=='observed-preview').map(m=>JSON.stringify([m.service,archiveConversationKey(m),m.direction,m.body])));
+  const displayRows = rows.filter(m=>m.timestampQuality!=='observed-preview' || !realSemantic.has(JSON.stringify([m.service,archiveConversationKey(m),m.direction,m.body])));
+  displayRows.sort((a,b) => a.ts - b.ts || a._i - b._i);
+
+  const summary = document.getElementById('summary');
+  summary.textContent = '原始 ' + raw.length + ' 条 · 去重显示 ' + displayRows.length + ' 条 · 再次点击 MacTranslate → 查看消息 可刷新';
+
+  const serviceSelect = document.getElementById('service');
+  [...new Set(displayRows.map(x => x.service))].sort().forEach(s => {
+    const o=document.createElement('option'); o.value=s; o.textContent=s; serviceSelect.appendChild(o);
+  });
+  const search=document.getElementById('search');
+  const direction=document.getElementById('direction');
+  const sidebar=document.getElementById('sidebar');
+  const messages=document.getElementById('messages');
+  const contentTitle=document.getElementById('contentTitle');
+  const contentMeta=document.getElementById('contentMeta');
+  let selectedKey='';
+
+  const convKey = m => m.service + '\\u001f' + archiveConversationKey(m);
+  const fmtSidebarTime = ts => ts ? new Date(ts).toLocaleString([], {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+  const fmtTime = ts => ts ? new Date(ts).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}) : '';
+  const fmtDay = ts => ts ? new Date(ts).toLocaleDateString([], {year:'numeric',month:'long',day:'numeric'}) : '未知日期';
+
+  function matches(m){
+    const svc=serviceSelect.value, dir=direction.value, q=search.value.trim().toLowerCase();
+    if(svc!=='all' && m.service!==svc) return false;
+    if(dir!=='all' && m.direction!==dir) return false;
+    if(q && !(m.body+' '+m.sender+' '+m.conversation+' '+m.service).toLowerCase().includes(q)) return false;
+    return true;
+  }
+  function getGroups(){
+    const map=new Map();
+    for(const m of displayRows){
+      if(!matches(m)) continue;
+      const k=convKey(m); if(!map.has(k)) map.set(k,[]); map.get(k).push(m);
+    }
+    return [...map.entries()].sort((a,b)=>(b[1].at(-1)?.ts||0)-(a[1].at(-1)?.ts||0));
+  }
+  function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
+  function renderSidebar(){
+    const groups=getGroups(); clear(sidebar);
+    if(!groups.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='没有符合条件的消息'; sidebar.appendChild(e); selectedKey=''; renderMessages(); return; }
+    if(!groups.some(([k])=>k===selectedKey)) selectedKey=groups[0][0];
+    for(const [k,list] of groups){
+      const last=list[list.length-1]; const item=document.createElement('div'); item.className='conversation'+(k===selectedKey?' active':'');
+      const top=document.createElement('div'); top.className='convTop';
+      const svc=document.createElement('div'); svc.className='service'; svc.textContent=last.service;
+      const title=document.createElement('div'); title.className='convTitle'; title.textContent=last.conversation;
+      const count=document.createElement('div'); count.className='count'; count.textContent=String(list.length);
+      top.append(svc,title,count);
+      const preview=document.createElement('div'); preview.className='preview'; preview.textContent=(last.direction==='outgoing'?'我: ':last.sender+': ')+last.body;
+      const t=document.createElement('div'); t.className='convTime'; t.textContent=fmtSidebarTime(last.ts);
+      item.append(top,preview,t); item.addEventListener('click',()=>{selectedKey=k; renderSidebar(); renderMessages();}); sidebar.appendChild(item);
+    }
+    renderMessages();
+  }
+  function renderMessages(){
+    clear(messages);
+    if(!selectedKey){ contentTitle.textContent='选择会话'; contentMeta.textContent=''; const e=document.createElement('div'); e.className='empty'; e.textContent='暂无消息'; messages.appendChild(e); return; }
+    const list=displayRows.filter(m=>convKey(m)===selectedKey && matches(m));
+    if(!list.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='这个会话没有符合条件的消息'; messages.appendChild(e); return; }
+    contentTitle.textContent=list[0].conversation;
+    contentMeta.textContent=list[0].service+' · '+list.length+' 条';
+    let lastDay='';
+    for(const m of list){
+      const day=fmtDay(m.ts); if(day!==lastDay){ const d=document.createElement('div'); d.className='day'; const span=document.createElement('span'); span.textContent=day; d.appendChild(span); messages.appendChild(d); lastDay=day; }
+      const row=document.createElement('div'); row.className='row '+m.direction;
+      const wrap=document.createElement('div'); wrap.className='msgWrap';
+      const sender=document.createElement('div'); sender.className='sender'; sender.textContent=m.direction==='outgoing'?'我':m.sender;
+      const bubble=document.createElement('div'); bubble.className='bubble'; bubble.textContent=m.body || '[空消息]';
+      const tm=document.createElement('div'); tm.className='time'; tm.textContent=fmtTime(m.ts);
+      wrap.append(sender,bubble,tm); row.appendChild(wrap); messages.appendChild(row);
+    }
+    messages.scrollTop=messages.scrollHeight;
+  }
+  search.addEventListener('input',renderSidebar); serviceSelect.addEventListener('change',renderSidebar); direction.addEventListener('change',renderSidebar);
+  renderSidebar();
+})();
+</script>
+</body>
+</html>`;
+};
+
+const showMessageViewer = async (): Promise<void> => {
+  if (!messageViewerWindow || messageViewerWindow.isDestroyed()) {
+    messageViewerWindow = new BrowserWindow({
+      width: 1100,
+      height: 720,
+      minWidth: 760,
+      minHeight: 480,
+      title: 'MacTranslate 消息记录',
+      parent: mainWindow,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    messageViewerWindow.on('closed', () => {
+      messageViewerWindow = undefined;
+    });
+  }
+  const html = buildMessageViewerHtml();
+  await messageViewerWindow.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+  );
+  messageViewerWindow.show();
+  messageViewerWindow.focus();
+};
+
+ipcMain.handle('message-recognition:view-messages', async () => {
+  await showMessageViewer();
+  return { ok: true, file: recognitionMessageFile() };
+});
+
+ipcMain.handle('message-recognition:export-messages', async () => {
+  const source = recognitionMessageFile();
+  if (!existsSync(source) || statSync(source).size === 0) {
+    await dialog.showMessageBox({
+      type: 'info',
+      title: 'MacTranslate',
+      message: '暂无可导出的消息',
+    });
+    return { ok: false, canceled: true };
+  }
+
+  const stamp = new Date().toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z');
+  const defaultPath = join(
+    app.getPath('downloads'),
+    `MacTranslate-messages-${stamp}.jsonl`,
+  );
+  const result = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, {
+        title: '导出消息',
+        defaultPath,
+        filters: [{ name: 'JSON Lines', extensions: ['jsonl'] }],
+      })
+    : await dialog.showSaveDialog({
+        title: '导出消息',
+        defaultPath,
+        filters: [{ name: 'JSON Lines', extensions: ['jsonl'] }],
+      });
+
+  if (result.canceled || !result.filePath) {
+    return { ok: false, canceled: true };
+  }
+
+  copyFileSync(source, result.filePath);
+  shell.showItemInFolder(result.filePath);
+  return { ok: true, file: result.filePath };
+});
+
 ipcMain.handle(
   'translate',
   async (_e, { text, translateToLanguage, translatorEngine }) => {
@@ -780,6 +1107,7 @@ ipcMain.on(
     }
   },
 );
+
 
 ipcMain.on('knownCertificateHosts', (_e, { knownHosts, serviceId }) => {
   debug(

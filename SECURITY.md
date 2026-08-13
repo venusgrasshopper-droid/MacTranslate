@@ -1,15 +1,35 @@
 # Security Policy
 
-## Supported Versions
+## Supported versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| > 6.*   | :white_check_mark: |
+The actively maintained public line is MacTranslate **v12.4.x**. Security fixes are applied to the current public baseline rather than to historical development snapshots.
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-If you discover a minor vulnerability in Ferdium, please create a new issue on GitHub. Minor vulnerabilities are those, that do not leave the user at immediate danger, i.e. though remote code execution.
+Please **do not** publish exploit details, credentials, private chat data, session material, access tokens, or proof-of-concept payloads in a public issue.
 
-If you discover a major vulnerability in Ferdium, please report it to us via E-Mail to [hello@ferdium.org](mailto:hello@ferdium.org?subject=[Security]%20), prefixing your E-Mail subject with "[Security]". We will then come in contact with you as quickly as possible.
+Preferred reporting path:
 
-Please keep in mind that some vulnerabilities you find may not be due to Ferdium but instead due to ElectronJS or Chromium. In that case, please contact the owners of those projects instead.
+1. Use GitHub's **Private vulnerability reporting** for `venusgrasshopper-droid/MacTranslate` when it is available.
+2. If private vulnerability reporting is unavailable, open a minimal public issue titled **Security contact request** without technical exploit details or sensitive data. The maintainer will move the discussion to a private channel before requesting reproduction material.
+
+Primary maintainer: `@venusgrasshopper-droid`.
+
+## High-risk areas
+
+Reports are especially useful when they involve:
+
+- Electron preload or IPC trust boundaries;
+- remote webview content escaping into local capabilities;
+- filesystem/archive access outside the intended data directory;
+- credential or session-data exposure;
+- unauthorized network requests or WebSocket manipulation;
+- command execution or unsafe shell/build-script behavior;
+- service recipe injection;
+- dependency, vendored-runtime or native-module supply-chain issues.
+
+A good report should include the affected commit/version, entry point, expected trust boundary, reproduction steps, observed impact and a minimal non-sensitive proof of concept when possible.
+
+## Upstream vulnerabilities
+
+MacTranslate contains and integrates upstream components including Ferdium/Electron, `@wppconnect/wa-js`, Signal-related runtime components and service-specific web applications. If a vulnerability is confirmed to originate entirely in an upstream project, the report may also need coordinated disclosure to that upstream maintainer. Please report it to MacTranslate first when the issue depends on MacTranslate's integration or local trust boundaries.

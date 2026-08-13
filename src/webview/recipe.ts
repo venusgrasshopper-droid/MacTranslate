@@ -7,7 +7,7 @@ import {
   disable as disableDarkMode,
   enable as enableDarkMode,
 } from 'darkreader';
-import { contextBridge, ipcRenderer, webFrame } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 import { pathExistsSync, readFileSync } from 'fs-extra';
 import { debounce, noop } from 'lodash';
 import { autorun, computed, makeObservable, observable } from 'mobx';
@@ -52,195 +52,6 @@ import type Service from '../models/Service';
 window.chrome.runtime.sendMessage = noop;
 
 const debug = require('../preload-safe-debug')('Ferdium:Plugin');
-
-const prepareTelegramHttpTransportBeforeBootstrap = () => {
-  if (
-    window.location.hostname.toLowerCase() !== 'web.telegram.org' ||
-    !window.location.pathname.startsWith('/a')
-  ) {
-    return;
-  }
-
-  const marker = '__mactranslateTelegramOfficialHttpTransportV1';
-  let markerValue: string | null = null;
-  try {
-    markerValue = window.sessionStorage.getItem(marker);
-  } catch {
-    return;
-  }
-
-  // On the second load the official Telegram cached setting is already in IDB,
-  // so let Telegram bootstrap normally and consume it in loadCachedSharedState().
-  if (markerValue === 'ready' || markerValue === 'failed') {
-    return;
-  }
-
-  // Preload runs before page scripts. Stop this first load so Telegram cannot
-  // construct MTProtoSender with the default WebSocket transport before the
-  // official shared-state flags have been persisted.
-  window.stop();
-
-  const DB_NAME = 'tt-data';
-  const STORE_NAME = 'store';
-  const STATE_KEY = 'tt-shared-state';
-  let finished = false;
-
-  const reload = (state: 'ready' | 'failed') => {
-    if (finished) return;
-    finished = true;
-    try {
-      window.sessionStorage.setItem(marker, state);
-    } catch {
-      // Continue with the reload even if sessionStorage is unavailable.
-    }
-    window.location.reload();
-  };
-
-  // Never leave the service on a stopped/blank document if storage is blocked.
-  const timeout = window.setTimeout(() => reload('failed'), 5000);
-
-  try {
-    // idb-keyval's createStore('tt-data', 'store') opens this DB without a
-    // caller-specified version. Do the same so we never force an IDB upgrade.
-    const request = window.indexedDB.open(DB_NAME);
-
-    request.onerror = () => {
-      window.clearTimeout(timeout);
-      reload('failed');
-    };
-
-    request.onupgradeneeded = () => {
-      // A fresh Telegram profile has no cached shared state yet. Do not create
-      // a partial Telegram state object; let Telegram initialize it itself.
-      try {
-        request.transaction?.abort();
-      } catch {
-        // noop
-      }
-      window.clearTimeout(timeout);
-      reload('failed');
-    };
-
-    request.onsuccess = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.close();
-        window.clearTimeout(timeout);
-        reload('failed');
-        return;
-      }
-
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
-      const getRequest = store.get(STATE_KEY);
-      let wroteSettings = false;
-
-      getRequest.onsuccess = () => {
-        const sharedState = getRequest.result;
-        if (!sharedState || typeof sharedState !== 'object') {
-          return;
-        }
-
-        const current = sharedState as Record<string, any>;
-        const settings =
-          current.settings && typeof current.settings === 'object'
-            ? current.settings
-            : {};
-
-        store.put(
-          {
-            ...current,
-            settings: {
-              ...settings,
-              // These are Telegram Web A's own experimental transport flags.
-              shouldAllowHttpTransport: true,
-              shouldForceHttpTransport: true,
-            },
-          },
-          STATE_KEY,
-        );
-        wroteSettings = true;
-      };
-
-      getRequest.onerror = () => {
-        // transaction completion below will select the safe failure path.
-      };
-
-      transaction.oncomplete = () => {
-        db.close();
-        window.clearTimeout(timeout);
-        reload(wroteSettings ? 'ready' : 'failed');
-      };
-
-      transaction.onerror = () => {
-        db.close();
-        window.clearTimeout(timeout);
-        reload('failed');
-      };
-
-      transaction.onabort = () => {
-        db.close();
-        window.clearTimeout(timeout);
-        reload('failed');
-      };
-    };
-  } catch {
-    window.clearTimeout(timeout);
-    reload('failed');
-  }
-};
-
-prepareTelegramHttpTransportBeforeBootstrap();
-
-const installTeamsBareTrustedEventRejectionGuard = () => {
-  const host = window.location.hostname.toLowerCase();
-  if (
-    host !== 'teams.live.com' &&
-    host !== 'teams.microsoft.com' &&
-    host !== 'teams.cloud.microsoft'
-  ) {
-    return;
-  }
-
-  // teams-for-linux documents the same unrelated Teams global-handler event:
-  // `Unhandled error/rejection {"isTrusted": true}`. Install before Teams page
-  // scripts and consume only that bare DOM Event rejection. Errors, strings,
-  // and objects carrying a message/name/stack are deliberately left untouched.
-  const code = `
-    (() => {
-      if (window.__mactranslateTeamsBareEventGuardInstalled) return;
-      window.__mactranslateTeamsBareEventGuardInstalled = true;
-
-      const isBareTrustedEvent = value => {
-        if (!value || typeof value !== 'object') return false;
-        if (value instanceof Error) return false;
-        if (value.isTrusted !== true) return false;
-        if (typeof value.message === 'string' && value.message.length > 0) return false;
-        if (typeof value.name === 'string' && value.name.length > 0) return false;
-        if (typeof value.stack === 'string' && value.stack.length > 0) return false;
-        return true;
-      };
-
-      window.addEventListener('unhandledrejection', event => {
-        if (!isBareTrustedEvent(event.reason)) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }, true);
-
-      window.addEventListener('error', event => {
-        if (!isBareTrustedEvent(event.error)) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }, true);
-    })();
-  `;
-
-  void webFrame
-    .executeJavaScriptInIsolatedWorld(0, [{ code }])
-    .catch(() => undefined);
-};
-
-installTeamsBareTrustedEventRejectionGuard();
 
 const badgeHandler = new BadgeHandler();
 
@@ -326,6 +137,121 @@ ipcRenderer.sendToHost(
   notificationsClassDefinition,
   screenShareJs,
 );
+
+
+// Microsoft Fluent UI intentionally exposes icon warning control through its
+// GlobalSettings-backed `icons.__options.disableWarnings` setting. Teams registers
+// overlapping icon bundles and unregisters aliases that may already be gone, which
+// produces hundreds of non-actionable warnings. Configure Fluent UI itself before
+// Teams modules initialize; do not intercept or replace console.warn/error.
+if (
+  location.hostname === 'teams.live.com' ||
+  location.hostname === 'teams.microsoft.com' ||
+  location.hostname === 'teams.cloud.microsoft'
+) {
+  ipcRenderer.sendToHost(
+    'inject-js-unsafe',
+    `(() => {
+      const root = window.__globalSettings__ || (window.__globalSettings__ = { __callbacks__: {} });
+      if (!root.__callbacks__) root.__callbacks__ = {};
+      const icons = root.icons || (root.icons = { __options: {}, __remapped: {} });
+      icons.__remapped = icons.__remapped || {};
+      icons.__options = { ...(icons.__options || {}), disableWarnings: true, warnOnMissingIcons: true };
+    })();`,
+  );
+}
+
+
+// Vendor runtime compatibility and last-resort noise handling.
+// Rule: fix behavior first. Suppress only exact upstream messages that cannot be
+// fixed from a wrapper because their owning web-app implementation is closed.
+if (location.hostname === 'web.whatsapp.com') {
+  ipcRenderer.sendToHost(
+    'inject-js-unsafe',
+    `(() => {
+      if (window.__MACTRANSLATE_WHATSAPP_RUNTIME_COMPAT_V16__) return;
+
+      // Chromium ignores buffered when entryTypes is supplied and logs a
+      // warning. WhatsApp currently supplies both. Normalize that invalid option
+      // combination before it reaches Chromium; effective observation semantics
+      // stay the same as Chromium's current behavior.
+      const NativePerformanceObserver = window.PerformanceObserver;
+      if (NativePerformanceObserver?.prototype?.observe) {
+        const nativeObserve = NativePerformanceObserver.prototype.observe;
+        Object.defineProperty(NativePerformanceObserver.prototype, 'observe', {
+          configurable: true,
+          writable: true,
+          value: function (options) {
+            if (options && Array.isArray(options.entryTypes) && options.buffered === true) {
+              const normalized = { ...options };
+              delete normalized.buffered;
+              return Reflect.apply(nativeObserve, this, [normalized]);
+            }
+            return Reflect.apply(nativeObserve, this, [options]);
+          },
+        });
+      }
+
+      // Meta's ErrorUtils/QPL diagnostics below are produced inside WhatsApp's
+      // closed web bundle and are reproduced in unmodified Chromium wrappers.
+      // Suppress only these exact known signatures. Do not suppress generic
+      // ErrorUtils failures or any MacTranslate message envelope.
+      const nativeError = console.error;
+      if (typeof nativeError === 'function') {
+        Object.defineProperty(console, 'error', {
+          configurable: true,
+          writable: true,
+          value: function (...args) {
+            const text = args.map((value) => {
+              if (typeof value === 'string') return value;
+              if (value instanceof Error) return value.stack || value.message || String(value);
+              try { return JSON.stringify(value); } catch { return String(value); }
+            }).join(' ');
+            const invariant56367 = text.includes('Minified invariant #56367');
+            const missingQplConfig = text.includes('Failed to find a Haste-supplied config for the QPL event identified by token');
+            if (invariant56367 || missingQplConfig) return;
+            return Reflect.apply(nativeError, console, args);
+          },
+        });
+      }
+
+      window.__MACTRANSLATE_WHATSAPP_RUNTIME_COMPAT_V16__ = true;
+    })();`,
+  );
+}
+
+if (
+  location.hostname === 'teams.live.com' ||
+  location.hostname === 'teams.microsoft.com' ||
+  location.hostname === 'teams.cloud.microsoft'
+) {
+  ipcRenderer.sendToHost(
+    'inject-js-unsafe',
+    `(() => {
+      if (window.__MACTRANSLATE_TEAMS_UPSTREAM_NOISE_V16__) return;
+      const nativeError = console.error;
+      if (typeof nativeError === 'function') {
+        Object.defineProperty(console, 'error', {
+          configurable: true,
+          writable: true,
+          value: function (...args) {
+            const text = args.map((value) => {
+              if (typeof value === 'string') return value;
+              if (value instanceof Error) return value.stack || value.message || String(value);
+              try { return JSON.stringify(value); } catch { return String(value); }
+            }).join(' ');
+            if (
+              text.includes('Unhandled error/rejection') &&
+              /["']?isTrusted["']?\\s*[:=]\\s*true/.test(text)
+            ) return;
+            return Reflect.apply(nativeError, console, args);
+          },
+        });
+      }
+      window.__MACTRANSLATE_TEAMS_UPSTREAM_NOISE_V16__ = true;
+    })();`,
+  );
+}
 
 class RecipeController {
   @observable settings: {
@@ -458,7 +384,7 @@ class RecipeController {
     const userCss = join(recipe.path, 'user.css');
     if (pathExistsSync(userCss)) {
       const data = readFileSync(userCss);
-      styles.innerHTML += data.toString();
+      styles.textContent = `${styles.textContent ?? ''}${data.toString()}`;
       debug('Loaded user.css from: ', userCss);
     }
     document.querySelector('head')?.append(styles);

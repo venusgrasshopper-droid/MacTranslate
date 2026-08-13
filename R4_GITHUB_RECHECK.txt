@@ -1,0 +1,6 @@
+R4 GitHub/upstream recheck
+
+Signal: OFFICIAL source; signalapp/Signal-Desktop tag v8.17.0. No production change from R3.
+Telegram: OFFICIAL source; Ajaxy/telegram-tt fetchChats/fetchMessages + tt-global BroadcastChannel. No production change from R3.
+Teams: THIRD_PARTY LIVE implementation; gediz/teams-web-chat-exporter. R4 adds the missing authz fallback and authz-provided messaging-token path from current api-client.ts.
+WhatsApp: REVERSE-MODULE evidence; vinikjkkj/wa-diff WAWebExportChatAction + WAWebExportChatPlainTextFormatter. R4 removes R3's incorrect type===chat gate and reads caption/body/poll/rich-response text using WhatsApp getters.

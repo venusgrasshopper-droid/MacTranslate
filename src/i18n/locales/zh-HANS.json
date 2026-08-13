@@ -79,6 +79,8 @@
   "menu.Todoss.openTodosDrawer": "打开Todos抽屉栏",
   "menu.app.about": "关于 Ferdium",
   "menu.app.autohideMenuBar": "自动隐藏菜单栏",
+  "menu.app.viewMessages": "查看消息",
+  "menu.app.exportMessages": "导出消息…",
   "menu.app.checkForUpdates": "检查更新",
   "menu.app.hide": "隐藏",
   "menu.app.hideOthers": "隐藏其它",

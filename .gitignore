@@ -395,15 +395,15 @@ server*.log
 vendor/signal-runtime/
 vendor/signal-source/
 
-# MacTranslate local/private runtime data
-.env
-.env.*
-*.db
-*.sqlite
-*.sqlite3
+# MacTranslate local/runtime data (never commit)
 *.log
 messages.jsonl
-archive.db
-local-data/
-runtime-data/
-user-data/
+*.session
+*.session-journal
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+.DS_Store
+.tmp/

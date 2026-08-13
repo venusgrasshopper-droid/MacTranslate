@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+const root=path.resolve(process.argv[2]||path.join(import.meta.dirname,'..'));
+const rec=fs.readFileSync(path.join(root,'src/electron/message-recognition/UnifiedMessageRecognition.ts'),'utf8');
+const viewer=fs.readFileSync(path.join(root,'src/index.ts'),'utf8');
+const fail=[];
+const must=(s,x,n)=>{if(!s.includes(x))fail.push('missing '+n+': '+x)};
+for(const [x,n] of [
+ ["safeRequire('WAWebSchemaChat')",'WA chat schema enumeration'],["safeRequire('WAWebDBMessageFindLocal')",'WA native local finder'],["safeRequire('WAWebWidFactory')",'WA WID factory'],["finder.msgFindBefore({ anchor, count: PAGE_SIZE })",'WA native history call'],["let anchor = { remote: chat.remote }",'WA ExportChat first anchor'],["const PAGE_SIZE = 50",'WA ExportChat page size'],["const MAX_PER_CHAT = 100000",'WA ExportChat safety limit'],['whatsapp-native-exportchat-local-history','WA native history event'],["safeRequire('WAWebMsgGetters')",'WA ExportChat text getters'],["safeRequire('WAWebMsgModelFromData')",'WA ExportChat DB model conversion'],['getCaption','WA media caption capture'],['getPollName','WA poll text capture'],["safeRequire('WAWebChatLoadMessages')",'WA provider history loader'],['loader.loadEarlierMsgs({ chat })','WA provider older-history completion'],['whatsapp-wawebchatloadmessages-history','WA provider history event'],["modelsOf(chat?.msgs)",'WA resident chat history snapshot'],['whatsapp-chat-resident-history','WA resident chat history event'],["safeRequire('WAWebApiChatBulkGetByHistory')",'WA historyChatId/LID resolver'],['bulkGetChatsMaybeByHistory','WA historyChatId/LID lookup'],['whatsapp-chat-msgs-history-add','WA late resident history event'],
+ ["telegramChannelName = () => 'tt-global_'",'Telegram official multitab channel'],["telegramCallApi('fetchChats'",'Telegram native dialog API'],["telegramCallApi('fetchMessages'",'Telegram native history API'],['threadId:-1','Telegram MAIN_THREAD_ID'],['telegram-web-a-api-fetchMessages','Telegram provider history event'],
+ ["teamsDbNames('conversation-manager')",'Teams conversation enumeration'],['fetchTeamsHistory','Teams API history paging'],["data?._metadata?.backwardLink",'Teams backwardLink pagination'],['refreshTeamsMessagingAuth','Teams per-page auth refresh'],["networkRetries<1",'Teams network retry'],['isTeamsChatServiceHistoryEligible','Teams special/pseudo conversation API gate'],['teams-chat-service-api','Teams provider history event'],[".Discover.SKYPE-TOKEN",'Teams Free cached token'],['https://teams.live.com/api/chatsvc/consumer','Teams Free chat service proxy'],["readTeamsTmpDiscover('SKYPE-AUTHZ-URL')",'Teams Free authz fallback'],['data?.skypeToken?.skypetoken||data?.tokens?.skypeToken','Teams authz messaging token'],
+ ['SIGNAL_HISTORY_PRIME_SCRIPT','Signal local history prime'],['loadNewestMessages(undefined, true)','Signal force newest local SQL load'],['loadOlderMessages(oldestId)','Signal local older paging'],['actions.messagesAdded = wrappedAdded','Signal pre-Redux page interception'],['actions.messagesReset = wrappedReset','Signal pre-Redux reset interception'],['signal-8.17.0-local-sql-history','Signal provider history event'],['signal-8.17.0-redux-cache-live','Signal live cache event'],
+]) must(rec,x,n);
+for(const [x,n] of [['archiveConversationKey','viewer grouping'],['latestByIdentity','viewer identity dedupe'],['displayRows','viewer display rows']]) must(viewer,x,n);
+for(const forbidden of ['teams-local-replychain-idb','telegram-web-a-idb-last-message-cache','whatsapp-local-db-full-table-scan']) if(rec.includes(forbidden)) fail.push('forbidden obsolete history path: '+forbidden);
+if(rec.includes('messageTable.all()')) fail.push('WhatsApp must use native ExportChat paging, not raw full message-table scan');
+if(rec.includes("if (clean(msg.type) !== 'chat') return false;")) fail.push('forbidden WhatsApp type===chat gate; it drops media captions and other text-bearing message types');
+if(fail.length){console.error('HISTORY_CAPTURE_FIXES_HARNESS_FAILED');for(const x of fail)console.error('- '+x);process.exit(1)}
+console.log('HISTORY_CAPTURE_FIXES_HARNESS_OK');
+console.log('telegram-official-api/teams-chat-service-refresh/whatsapp-exportchat+provider-loadEarlierMsgs/signal-pre-redux-local-sql=PASS');

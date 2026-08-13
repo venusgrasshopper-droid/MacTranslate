@@ -3,48 +3,76 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const root = path.resolve(process.argv[2] || path.join(import.meta.dirname, '..'));
-const read = p => fs.readFileSync(path.join(root, p), 'utf8');
-const fail = [];
-const must = (s, x, label) => { if (!s.includes(x)) fail.push(`missing ${label}`); };
-const ban = (s, x, label) => { if (s.includes(x)) fail.push(`forbidden ${label}`); };
+const read = rel => fs.readFileSync(path.join(root, rel), 'utf8');
+const failures = [];
+const requireText = (label, text, needle) => {
+  if (!text.includes(needle)) failures.push(`${label}: missing ${needle}`);
+};
+const forbid = (label, text, pattern) => {
+  if (pattern.test(text)) failures.push(`${label}: forbidden ${pattern}`);
+};
 
 const pkg = JSON.parse(read('package.json'));
+if (pkg.devDependencies?.electron !== '38.1.0' && pkg.dependencies?.electron !== '38.1.0') {
+  failures.push('Electron must remain pinned to 38.1.0 for frozen Signal runtime');
+}
+
 const index = read('src/index.ts');
-const preload = read('src/webview/recipe.ts');
-const recipeWebview = read('src/webview/lib/RecipeWebview.ts');
-const telegramRecipe = read('recipes/recipes/telegram/index.js');
-const teamsRecipe = read('recipes/recipes/msteams/index.js');
+requireText('WhatsApp permission', index, "permissionName === 'persistent-storage'");
+requireText('WhatsApp permission', index, "new URL(value).origin === 'https://web.whatsapp.com'");
+requireText('WhatsApp permission', index, 'setPermissionRequestHandler');
+requireText('WhatsApp permission', index, 'setPermissionCheckHandler');
+forbid('WhatsApp permission', index, /permissionName\s*===\s*['\"]unknown['\"]/);
+forbid('WhatsApp permission', index, /Browser\.setPermission|durableStorage/);
 
-if (pkg.devDependencies?.electron !== '38.1.0') fail.push('Electron must remain pinned to 38.1.0 for Signal RP01');
-must(recipeWebview, "styles.textContent = readFileSync(file, 'utf8');", 'Trusted Types-safe CSS sink');
-ban(recipeWebview, 'styles.innerHTML =', 'Trusted Types-unsafe style innerHTML');
+const recognition = read('src/electron/message-recognition/UnifiedMessageRecognition.ts');
+requireText('WhatsApp logger barrier', recognition, "safeRequire('WATagsLogger')");
+requireText('WhatsApp logger barrier', recognition, 'tagsLogger.whenReady()');
+requireText('WhatsApp capture', recognition, "safeRequire('WAWebCollections')");
+requireText('Telegram transport restore', recognition, 'settings.shouldAllowHttpTransport=true');
+requireText('Telegram adaptive transport', recognition, 'settings.shouldForceHttpTransport=Boolean(force)');
+requireText('Telegram adaptive transport', recognition, 'telegram-force-http-reverted');
+requireText('Telegram transport restore', recognition, "indexedDB.open('tt-data')");
+requireText('Telegram transport restore', recognition, "store.get('tt-shared-state')");
+forbid('Telegram transport', recognition, /configureTelegramHttpCors|scoped-apiw1-response-header/);
+forbid('Telegram HTTP', recognition, /window\.WebSocket\s*=|window\.Worker\s*=|WebSocket\.prototype|Worker\.prototype/);
+requireText('Telegram readiness', recognition, "data.type==='globalDiffUpdate'");
+requireText('Telegram readiness', recognition, "data.type==='globalUpdate'");
+requireText('Telegram readiness', recognition, 'data.diff?.connectionState');
+requireText('Telegram readiness', recognition, "'connectionStateReady'");
+requireText('Telegram readiness', recognition, 'Date.now()-state.readySince>=8000');
+forbid('Telegram readiness', recognition, /readTelegramConnectionState|telegramGlobalStateKey/);
+forbid('storage API', recognition, /navigator\.storage\.persist\s*=|navigator\.permissions\.query\s*=/);
 
-must(index, "permissionName === 'persistent-storage'", 'Electron durable-storage permission handling');
-must(index, "hostname.toLowerCase() === 'web.whatsapp.com'", 'WhatsApp-only persistent storage scope');
-must(index, 'isWhatsAppOrigin(requestingUrl)', 'WhatsApp request permission scope');
+const service = read('src/models/Service.ts');
+requireText('Teams Chrome UA', service, "recipe.id === 'msteams'");
+requireText('Teams Chrome UA', service, 'Ferdium|Electron|MacTranslate');
+const recipePreload = read('src/webview/recipe.ts');
+forbid('Teams broad event hiding', recipePreload, /isTrustedDomEventRejection|stopImmediatePropagation\(\)/);
+requireText('WhatsApp PerformanceObserver compatibility', recipePreload, 'delete normalized.buffered');
+requireText('WhatsApp exact upstream invariant handling', recipePreload, 'Minified invariant #56367');
+requireText('WhatsApp exact upstream QPL handling', recipePreload, 'Haste-supplied config for the QPL event');
+requireText('Teams exact upstream isTrusted handling', recipePreload, "text.includes('Unhandled error/rejection')");
+forbid('Generic ErrorUtils hiding', recipePreload, /text\.includes\(['"]ErrorUtils caught an error:/);
+forbid('Generic Teams console hiding', recipePreload, /text\.includes\(['"]Unhandled error\/rejection['"]\)\s*\)\s*return/);
+forbid('Teams TrustedHTML bridge', recognition, /new DOMParser\(\)\.parseFromString\([^,]+,\s*['\"]text\/html['\"]\)/);
+requireText('Teams TrustedHTML bridge', recognition, 'decodeHtmlEntities');
 
-must(preload, "const STATE_KEY = 'tt-shared-state';", 'Telegram official shared-state key');
-must(preload, "const DB_NAME = 'tt-data';", 'Telegram official IDB database');
-must(preload, 'window.stop();', 'Telegram pre-bootstrap stop');
-must(preload, 'shouldAllowHttpTransport: true', 'Telegram allow HTTP official setting');
-must(preload, 'shouldForceHttpTransport: true', 'Telegram force HTTP official setting');
-must(preload, 'loadCachedSharedState()', 'Telegram upstream cache-load rationale');
-ban(preload, 'Worker.prototype.postMessage', 'Telegram Worker monkey patch');
-ban(preload, 'contextBridge.executeInMainWorld', 'fragile executeInMainWorld function serialization');
+for (const rel of [
+  'src/webview/lib/RecipeWebview.ts',
+  'src/webview/contextMenuBuilder.ts',
+  'src/webview/darkmode.ts',
+  'src/webview/recipe.ts',
+  'src/features/appearance/index.ts',
+]) {
+  forbid(`TrustedHTML ${rel}`, read(rel), /\.innerHTML\s*[-+]*=/);
+}
 
-must(preload, 'executeJavaScriptInIsolatedWorld(0', 'early Teams Main World guard');
-must(preload, "window.addEventListener('unhandledrejection'", 'Teams rejection guard');
-must(preload, 'event.stopImmediatePropagation();', 'Teams upstream logger short-circuit');
-ban(preload, 'console.error =', 'console.error monkey patch');
-ban(preload, 'console.warn =', 'console.warn monkey patch');
-
-ban(telegramRecipe, 'shouldForceHttpTransport', 'late Telegram recipe transport mutation');
-ban(telegramRecipe, 'indexedDB.open', 'late Telegram recipe IDB mutation');
-ban(teamsRecipe, 'unhandledrejection', 'late Teams recipe event guard');
-
-if (fail.length) {
+if (failures.length) {
   console.error('STABLE_ROOTCAUSE_VERIFY_FAILED');
-  for (const item of fail) console.error(`- ${item}`);
+  failures.forEach(failure => console.error(`- ${failure}`));
   process.exit(1);
 }
+
 console.log('STABLE_ROOTCAUSE_VERIFY_OK');
+console.log('SignalPin=38.1.0 WhatsApp=persistent-storage+logger-barrier Telegram=upstream-adaptive-force-http+stable-ready-gate Teams=chrome-UA+FluentUI-config no-broad-console-hiding+exact-upstream-only=PASS');

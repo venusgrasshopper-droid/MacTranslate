@@ -28,6 +28,7 @@ const chats=new Map(); const contacts=new Map();
 const me={_serialized:'15550001111@c.us'};
 let collectionsReady=true;
 const modules={
+  WATagsLogger:{ whenReady:()=>Promise.resolve() },
   WAWebCollections:{ Msg, Chat:{get:k=>chats.get(k?._serialized||k)}, Contact:{get:k=>contacts.get(k?._serialized||k)} },
 };
 const envelopes=[];
@@ -81,6 +82,7 @@ const scheduled=[];
 const window2={Debug:{VERSION:'2.3000.test'},require(name){ if(name==='WAWebCollections'&&!collectionsReady)return undefined; return modules[name]; },addEventListener(){},removeEventListener(){}};
 const context2={...context,window:window2,console:{info(){}},setTimeout:(fn,delay)=>{scheduled.push({fn,delay}); return scheduled.length;},clearTimeout:()=>{}};
 vm.createContext(context2); vm.runInContext(bridge,context2,{timeout:3000});
+await new Promise(r=>setImmediate(r));
 assert(scheduled.length===1&&scheduled[0].delay===250,'first readiness retry must be 250ms');
 collectionsReady=true; scheduled.shift().fn();
 assert(Msg2.listenerCount('add')===1,'delayed provider did not attach');

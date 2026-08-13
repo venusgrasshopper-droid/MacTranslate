@@ -99,7 +99,7 @@ const translatePopup = (res, isError: boolean = false) => {
   }
 
   const style = document.createElement('style');
-  style.innerHTML = `
+  style.textContent = `
     .container-ferdium-translator {
       position: fixed;
       opacity: 0.9;

@@ -1,3 +1,5 @@
+> Historical root-cause snapshot from the earlier public baseline. The current public maintenance line is **STABLE-UPSTREAM-CAPTURE-R16 (2026-08-13)**; see `SOURCE_BASELINE_AND_SCOPE.txt` and `MACTRANSLATE_CHANGELOG.md`.
+
 # GitHub root-cause fixes
 
 - WhatsApp: Electron v38.1.0 maps Blink DURABLE_STORAGE to `persistent-storage`; MacTranslate previously denied it. The fix grants that permission only to `web.whatsapp.com` in both request and check handlers.
