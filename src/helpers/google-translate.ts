@@ -183,3 +183,15 @@ export const translateWithGoogle = async (
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   return { ok: true, engine: 'Google Translate', results };
 };
+
+let lastWarmAt = 0;
+
+// Open the TLS connection to Google before the first translation is needed;
+// a fresh connection costs ~1 s, a warm one ~0.3 s per request.
+export const warmGoogleConnection = (): void => {
+  if (Date.now() - lastWarmAt < 30_000) return;
+  lastWarmAt = Date.now();
+  void net
+    .fetch('https://translate.googleapis.com/', { method: 'HEAD' })
+    .catch(() => {});
+};

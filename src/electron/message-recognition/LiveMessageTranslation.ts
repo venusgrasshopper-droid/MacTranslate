@@ -4,6 +4,7 @@ import {
   googleTranslateWithAlternatives,
   type TranslationResult,
   translateWithGoogle,
+  warmGoogleConnection,
 } from '../../helpers/google-translate';
 
 // Live translation for chat webviews: incoming messages get a translation box
@@ -63,7 +64,7 @@ const MESSAGE_POLL_MS = 650;
 const COMPOSER_POLL_MS = 16;
 const COMPOSER_KICK_DELAY_MS = 0;
 // Wait until typing pauses before asking Google, so it is not hit per keystroke.
-const COMPOSER_SETTLE_MS = 500;
+const COMPOSER_SETTLE_MS = 250;
 
 const translatableText = (value: string): boolean => {
   const text = value.trim();
@@ -240,7 +241,7 @@ const applyScript = (
   box.dataset.mactranslateSource=wanted.text;
   const label=box.querySelector('.mactranslate-live-translation-label');
   const value=box.querySelector('.mactranslate-live-translation-text');
-  if(label)label.textContent=(translated.sourceLanguage||'auto')+' → '+(translated.targetLanguage||'')+' · Google';
+  if(label)label.textContent=(translated.sourceLanguage||'auto')+' → '+(translated.targetLanguage||'');
   if(value)value.textContent=translated.status==='ok'?(translated.translatedText||''):(translated.message||'翻译失败');
   box.style.borderLeftColor=translated.status==='ok'?'#0a84ff':'#ff9f0a';
   return true;
@@ -343,8 +344,7 @@ const composerBridgeScript = (service: string) =>
     const label=preview.querySelector('.mactranslate-composer-translation-label');
     const value=preview.querySelector('.mactranslate-composer-translation-text');
     const base=direction?directionLabel(direction):'中英自动翻译';
-    const engine=preview.dataset.mactranslateEngine||'Google';
-    if(label)label.textContent=state==='busy'?base+' · 翻译中…':base+' · '+engine+(direction==='zh-en'?' · 点击句子可换其他译法，检查无误后按回车发送':'');
+    if(label)label.textContent=base;
     if(value&&replaceValue)value.textContent=text;
   };
   // The user must have seen the translation of exactly this text before it can be sent.
@@ -517,7 +517,7 @@ const composerBridgeScript = (service: string) =>
     const ready=node.dataset.mactranslateTranslatedSource===text&&Boolean(node.dataset.mactranslateTranslatedText);
     if(preview?.dataset.mactranslateBlockedSource===text){
       const blockedLabel=preview.querySelector('.mactranslate-composer-translation-label');
-      if(blockedLabel)blockedLabel.textContent=directionLabel(direction)+' · 翻译失败，不能发送';
+      if(blockedLabel)blockedLabel.textContent=directionLabel(direction);
     }
     else if(!ready)updatePreview(node,'','busy',direction,false);
     else updatePreview(node,'','ready',direction,false);
@@ -561,22 +561,6 @@ const translateComposer = async (
       message: `谷歌翻译不可用：${google.message ?? ''}`,
     };
   }
-  // Back-translate every alternative so each choice shows its Chinese meaning.
-  const alternatives = [
-    ...new Set(google.sentences.flatMap(item => item.alternatives)),
-  ];
-  const meanings = await translateWithGoogle(
-    alternatives.map((alternative, index) => ({
-      id: String(index),
-      text: alternative,
-    })),
-  );
-  const meaningOf = new Map(
-    alternatives.map((alternative, index) => {
-      const result = meanings.results[index];
-      return [alternative, result?.status === 'ok' ? result.translatedText ?? '' : ''];
-    }),
-  );
   return {
     id: 'composer',
     originalText: text,
@@ -589,10 +573,36 @@ const translateComposer = async (
       ...item,
       choices: item.alternatives.map(alternative => ({
         text: alternative,
-        meaning: meaningOf.get(alternative) ?? '',
+        meaning: '',
       })),
     })),
   };
+};
+
+// Fill each choice's Chinese meaning after the preview is already shown.
+const fillChoiceMeanings = async (
+  contents: WebContents,
+  sourceText: string,
+  sentences: ComposerSentence[],
+) => {
+  const alternatives = [
+    ...new Set(sentences.flatMap(item => item.alternatives)),
+  ];
+  // One request for all choices, one per line, to keep Google traffic low.
+  const response = await translateWithGoogle([
+    { id: 'meanings', text: alternatives.join('\n') },
+  ]);
+  const lines = String(response.results[0]?.translatedText ?? '').split('\n');
+  if (lines.length !== alternatives.length) return;
+  const meaningOf: Record<string, string> = {};
+  alternatives.forEach((alternative, index) => {
+    meaningOf[alternative] = lines[index].trim();
+  });
+  if (contents.isDestroyed()) return;
+  await contents.executeJavaScript(
+    `(()=>{const preview=document.querySelector('.mactranslate-composer-translation');if(preview?.dataset.mactranslateAppliedSource!==${JSON.stringify(sourceText)})return;const meanings=${JSON.stringify(meaningOf)};for(const span of preview.querySelectorAll('.mactranslate-sentence')){const choices=JSON.parse(span.dataset.choices||'[]');span.dataset.choices=JSON.stringify(choices.map(choice=>({...choice,meaning:meanings[choice.text]||choice.meaning})));}})()`,
+    true,
+  );
 };
 
 const composerApplyScript = (
@@ -649,13 +659,13 @@ const composerApplyScript = (
     ? (translated.message||'翻译失败')
     : /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(translated.translatedText) ? '译文仍含中文' : '';
   if(failed&&!chineseSource){
-    if(label)label.textContent=direction+' · Google';
+    if(label)label.textContent=direction;
     if(value)value.textContent='参考译文失败：'+(translated.message||'翻译失败');
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;
     return {applied:true};
   }
   if(blocked){
-    if(label)label.textContent=direction+' · Google';
+    if(label)label.textContent=direction;
     if(value)value.textContent='无法发送：'+blocked;
     if(preview){preview.style.borderLeftColor='#ff9f0a';preview.dataset.mactranslateBlockedSource=sourceText;}
     // Only English may be sent: Chinese that cannot be fully translated is blocked.
@@ -664,7 +674,7 @@ const composerApplyScript = (
   }
   node.dataset.mactranslateTranslatedSource=sourceText;
   node.dataset.mactranslateTranslatedText=translated.translatedText;
-  if(label)label.textContent=direction+' · '+(translated.engine||'Google');
+  if(label)label.textContent=direction;
   if(preview){
     preview.style.borderLeftColor='#0a84ff';
     delete preview.dataset.mactranslateBlockedSource;
@@ -678,6 +688,10 @@ const composerApplyScript = (
             span.className='mactranslate-sentence';
             span.dataset.choices=JSON.stringify(sentence.choices||[]);
             span.textContent=sentence.translation;
+            // Each sentence is visibly separate so it is clear which one a click changes.
+            span.style.cssText='border-bottom:1px dashed rgba(10,132,255,.6);border-radius:3px;padding:0 2px;margin-right:3px;cursor:pointer;';
+            span.addEventListener('mouseenter',()=>{span.style.background='rgba(10,132,255,.16)';});
+            span.addEventListener('mouseleave',()=>{span.style.background='';});
             value.appendChild(span);
           }
         }else value.textContent=translated.translatedText;
@@ -788,6 +802,7 @@ const processComposer = async (service: string, contents: WebContents) => {
     const text = String(state?.text ?? '').trim();
     if (!text || !state?.direction) return;
     if (text !== target.composerText) {
+      if (!target.composerText) warmGoogleConnection();
       target.composerText = text;
       target.composerTextAt = Date.now();
     }
@@ -805,6 +820,9 @@ const processComposer = async (service: string, contents: WebContents) => {
       composerApplyScript(service, text, result),
       true,
     );
+    if (result.sentences?.length) {
+      void fillChoiceMeanings(contents, text, result.sentences).catch(() => {});
+    }
     if (!applied?.send || contents.isDestroyed()) return;
 
     if (typeof applied.outgoing === 'string' && applied.outgoing.trim()) {
