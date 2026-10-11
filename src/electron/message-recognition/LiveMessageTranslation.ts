@@ -449,6 +449,53 @@ const composerBridgeScript = (service: string) =>
     },true);
     document.addEventListener('keydown',event=>{if(event.key==='Escape')closeChoices();},true);
   }
+  // Hard rule: no text containing Chinese leaves through any send path
+  // (captions, Cmd/Ctrl+Enter, other send buttons). The main composer's plain
+  // Enter/Send goes through the translate-then-send flow instead.
+  const isSearchField=field=>field.matches?.('input[type="search"],[role="searchbox"]')||/search|搜索/i.test((field.getAttribute?.('aria-label')||'')+' '+(field.getAttribute?.('placeholder')||'')+' '+(field.getAttribute?.('data-placeholder')||'')+' '+(field.getAttribute?.('title')||''));
+  const editableFrom=node=>node?.closest?.('textarea,input,[contenteditable="true"],[contenteditable="plaintext-only"]')||null;
+  const hasChinese=text=>directionFor(text)==='zh-en';
+  const warnChinese=field=>{
+    document.querySelector('.mactranslate-chinese-blocked')?.remove();
+    const rect=field.getBoundingClientRect?.();
+    const note=document.createElement('div');
+    note.className='mactranslate-chinese-blocked';
+    note.textContent='内容含中文，禁止发送';
+    note.style.cssText='position:fixed;z-index:2147483647;padding:4px 10px;border-radius:6px;background:#ff3b30;color:#fff;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;pointer-events:none;';
+    note.style.left=Math.max(8,rect?.left||8)+'px';
+    note.style.top=Math.max(8,(rect?.top||40)-30)+'px';
+    (document.body||document.documentElement).appendChild(note);
+    setTimeout(()=>note.remove(),3000);
+  };
+  if(!window.__MACTRANSLATE_CHINESE_GUARD_R32__){
+    window.__MACTRANSLATE_CHINESE_GUARD_R32__=true;
+    document.addEventListener('keydown',event=>{
+      if(window.__MACTRANSLATE_SEND_BYPASS_R14__)return;
+      if(event.key!=='Enter'||event.shiftKey||event.isComposing||window.__MACTRANSLATE_COMPOSING_R14__)return;
+      const field=editableFrom(event.target);
+      if(!field||isSearchField(field)||!hasChinese(read(field)))return;
+      if(field===composer()&&!event.altKey&&!event.ctrlKey&&!event.metaKey)return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      warnChinese(field);
+    },true);
+    document.addEventListener('click',event=>{
+      if(window.__MACTRANSLATE_SEND_BYPASS_R14__)return;
+      const button=event.target.closest?.('button,[role="button"],span[data-icon]');
+      if(!button)return;
+      const name=((button.getAttribute('aria-label')||'')+' '+(button.getAttribute('data-icon')||'')+' '+(button.getAttribute('data-tid')||'')+' '+(button.getAttribute('data-testid')||'')+' '+(button.getAttribute('title')||'')+' '+String(button.className||'')).toLowerCase();
+      if(!/send|发送/.test(name))return;
+      const main=composer();
+      if(main&&hasChinese(read(main)))return;
+      const scope=button.closest('[role="dialog"],[aria-modal="true"]')||document;
+      const field=[...scope.querySelectorAll('textarea,input,[contenteditable="true"],[contenteditable="plaintext-only"]')]
+        .find(item=>!isSearchField(item)&&!item.closest('.mactranslate-composer-translation')&&item.getClientRects().length&&hasChinese(read(item)));
+      if(!field)return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      warnChinese(field);
+    },true);
+  }
   if(!window.__MACTRANSLATE_COMPOSER_BRIDGE_R14__){
     window.__MACTRANSLATE_COMPOSER_BRIDGE_R14__=true;
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;

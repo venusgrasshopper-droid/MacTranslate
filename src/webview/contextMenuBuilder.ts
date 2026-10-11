@@ -12,7 +12,6 @@ import {
   type WebContents,
   clipboard,
   ipcRenderer,
-  nativeImage,
 } from 'electron';
 import { cmdOrCtrlShortcutKey, isMac } from '../environment';
 
@@ -745,11 +744,9 @@ export class ContextMenuBuilder {
     const copyImage = new MenuItem({
       label: this.stringTable.copyImage(),
       click: () => {
-        const result = this.convertImageToBase64(
-          menuInfo.srcURL,
-          (dataURL: string) =>
-            clipboard.writeImage(nativeImage.createFromDataURL(dataURL)),
-        );
+        // Copy the image as rendered. Re-downloading it (convertImageToBase64)
+        // fails for images that need the service's login or lack CORS headers.
+        const result = this.getWebContents().copyImageAt(menuInfo.x, menuInfo.y);
 
         this._sendNotificationOnClipboardEvent(
           menuInfo.clipboardNotifications,
