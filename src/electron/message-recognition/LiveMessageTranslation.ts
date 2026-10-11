@@ -4,6 +4,12 @@ import {
   translateWithMacOS,
   warmMacOSTranslationHelper,
 } from '../../helpers/macos-translation-native';
+import {
+  type GoogleSentence,
+  type GoogleWordChoices,
+  googleTranslateWithAlternatives,
+  googleWordChoices,
+} from '../../helpers/google-translate-alternatives';
 
 // Live translation for chat webviews: incoming messages get a translation box
 // under the bubble, and the composer text is translated before it is sent.
@@ -15,6 +21,7 @@ interface ScannedMessage {
 }
 
 interface ComposerState {
+  wordRequest?: { id: string; word: string } | null;
   text?: string;
   direction?: string;
   isComposing?: boolean;
@@ -29,6 +36,11 @@ interface ComposerApplyResult {
   y?: number;
 }
 
+type ComposerTranslation = MacOSTranslationResult & {
+  engine?: string;
+  sentences?: GoogleSentence[];
+};
+
 interface LiveTarget {
   contents: WebContents;
   messageTimer: NodeJS.Timeout | null;
@@ -40,6 +52,8 @@ interface LiveTarget {
   inputListener: ((event: Electron.Event, input: Input) => void) | null;
   cache: Map<string, MacOSTranslationResult>;
   failedUntil: Map<string, number>;
+  composerText: string;
+  composerTextAt: number;
 }
 
 const liveTargets = new Map<number, LiveTarget>();
@@ -50,6 +64,8 @@ const BATCH_LIMIT = 12;
 const MESSAGE_POLL_MS = 650;
 const COMPOSER_POLL_MS = 16;
 const COMPOSER_KICK_DELAY_MS = 0;
+// Wait until typing pauses before asking Google, so it is not hit per keystroke.
+const COMPOSER_SETTLE_MS = 500;
 
 const translatableText = (value: string): boolean => {
   const text = value.trim();
@@ -98,7 +114,7 @@ const scanScript = (service: string) => String.raw`
       key:clean(key).slice(0,4096),
       text:clean(text).slice(0,20000),
       direction:direction==='outgoing'?'outgoing':'incoming',
-      hasTranslation:Boolean(row.querySelector?.('.mactranslate-live-translation')),
+      hasTranslation:[...(row.querySelectorAll?.('.mactranslate-live-translation')||[])].some(box=>box.dataset.mactranslateSource===clean(text).slice(0,20000)),
     });
   };
 
@@ -223,6 +239,7 @@ const applyScript = (
     box.appendChild(value);
     try{anchor.insertAdjacentElement('afterend',box);}catch{row.appendChild(box);}
   }
+  box.dataset.mactranslateSource=wanted.text;
   const label=box.querySelector('.mactranslate-live-translation-label');
   const value=box.querySelector('.mactranslate-live-translation-text');
   if(label)label.textContent=(translated.sourceLanguage||'auto')+' → '+(translated.targetLanguage||'')+' · macOS';
@@ -297,39 +314,18 @@ const composerBridgeScript = (service: string) =>
     if(!preview?.isConnected){
       preview=document.createElement('div');
       preview.className='mactranslate-composer-translation';
-      preview.style.cssText='position:fixed;box-sizing:border-box;margin:0;padding:6px 9px;border-left:2px solid #0a84ff;border-radius:4px;background:rgba(10,132,255,.08);color:inherit;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:112px;overflow:auto;z-index:2147483647;transform:translateY(-100%);';
+      preview.style.cssText='position:fixed;box-sizing:border-box;margin:0;padding:6px 9px;border-left:2px solid #0a84ff;border-radius:4px;background:rgba(10,132,255,.08);color:inherit;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:45vh;overflow:auto;z-index:2147483647;transform:translateY(-100%);';
       const header=document.createElement('div');
       header.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:3px;';
       const label=document.createElement('div');
       label.className='mactranslate-composer-translation-label';
       label.style.cssText='opacity:.58;font-size:10px;line-height:1.25;flex:1;';
       header.appendChild(label);
-      const original=document.createElement('button');
-      original.type='button';
-      original.className='mactranslate-send-original';
-      original.textContent='发送原文';
-      original.style.cssText='border:0;border-radius:6px;padding:2px 8px;background:rgba(127,127,127,.28);color:inherit;font:11px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;';
-      original.addEventListener('click',event=>{
-        event.preventDefault();
-        event.stopPropagation();
-        const current=composer();
-        if(!current||!read(current))return;
-        window.__MACTRANSLATE_SEND_BYPASS_R14__=true;
-        const button=sendButton();
-        if(button?.click)button.click();
-        else{
-          current.focus();
-          current.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-          current.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-        }
-        setTimeout(()=>{window.__MACTRANSLATE_SEND_BYPASS_R14__=false;},500);
-      },true);
-      header.appendChild(original);
       preview.appendChild(header);
       const value=document.createElement('div');
       value.className='mactranslate-composer-translation-text';
       value.contentEditable='true';
-      value.spellcheck=false;
+      value.spellcheck=true;
       value.style.cssText='outline:none;min-height:18px;user-select:text;cursor:text;';
       value.addEventListener('input',()=>{
         const active=composer();
@@ -349,10 +345,113 @@ const composerBridgeScript = (service: string) =>
     const label=preview.querySelector('.mactranslate-composer-translation-label');
     const value=preview.querySelector('.mactranslate-composer-translation-text');
     const base=direction?directionLabel(direction):'中英自动翻译';
-    if(label)label.textContent=state==='busy'?base+' · macOS · 翻译中…':base+' · macOS';
+    const engine=preview.dataset.mactranslateEngine||'macOS';
+    if(label)label.textContent=state==='busy'?base+' · 翻译中…':base+' · '+engine+(direction==='zh-en'?' · 点击译文可换词/换句，检查无误后按回车发送':'');
     if(value&&replaceValue)value.textContent=text;
   };
+  // The user must have seen the translation of exactly this text before it can be sent.
+  const previewShowing=(node,text)=>{
+    const preview=document.querySelector('.mactranslate-composer-translation');
+    return node.dataset.mactranslateTranslatedSource===text&&preview?.style.display!=='none'&&preview?.dataset.mactranslateAppliedSource===text&&Boolean(preview?.dataset.mactranslateAppliedText);
+  };
   const clearPreview=()=>{const preview=document.querySelector('.mactranslate-composer-translation');if(preview)preview.style.display='none';};
+  const closeChoices=()=>document.querySelector('.mactranslate-choices')?.remove();
+  const commitPreview=value=>{
+    const preview=value.closest('.mactranslate-composer-translation');
+    const active=composer();
+    if(preview){
+      preview.dataset.mactranslateAppliedText=clean(value.innerText||value.textContent);
+      preview.dataset.mactranslateAppliedSource=active?read(active):'';
+    }
+    closeChoices();
+    active?.focus();
+  };
+  const isWordChar=c=>/[A-Za-z0-9'’-]/.test(c||'');
+  // Google-style choices for the clicked sentence and the word under the pointer.
+  const openChoices=(value,sentence,x,y)=>{
+    closeChoices();
+    const popup=document.createElement('div');
+    popup.className='mactranslate-choices';
+    popup.style.cssText='position:fixed;z-index:2147483647;max-width:420px;max-height:50vh;overflow:auto;padding:6px 0;border-radius:8px;background:#fff;color:#111;box-shadow:0 6px 24px rgba(0,0,0,.25);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+    const section=title=>{const h=document.createElement('div');h.textContent=title;h.style.cssText='padding:4px 12px;font-size:11px;color:#666;';popup.appendChild(h);return h;};
+    const option=(text,onPick)=>{
+      const item=document.createElement('div');
+      item.className='mactranslate-choice';
+      item.textContent=text;
+      item.style.cssText='padding:5px 12px;cursor:pointer;white-space:normal;';
+      item.addEventListener('mouseenter',()=>{item.style.background='rgba(10,132,255,.12)';});
+      item.addEventListener('mouseleave',()=>{item.style.background='';});
+      item.addEventListener('mousedown',event=>{event.preventDefault();event.stopPropagation();onPick();});
+      popup.appendChild(item);
+      return item;
+    };
+    let word=null;
+    const caret=document.caretRangeFromPoint?.(x,y);
+    const node=caret?.startContainer;
+    if(node?.nodeType===3&&value.contains(node)){
+      const text=node.textContent;
+      let start=caret.startOffset;
+      let end=caret.startOffset;
+      while(start>0&&isWordChar(text[start-1]))start--;
+      while(end<text.length&&isWordChar(text[end]))end++;
+      while(start<end&&/['’-]/.test(text[start]))start++;
+      while(end>start&&/['’-]/.test(text[end-1]))end--;
+      if(/[A-Za-z]/.test(text.slice(start,end)))word={node,start,end,text:text.slice(start,end)};
+    }
+    if(sentence){
+      const current=sentence.textContent.trim();
+      const alternatives=JSON.parse(sentence.dataset.alternatives||'[]').filter(item=>item.trim()!==current);
+      section(alternatives.length?'整句候选':'整句候选：没有其他译法');
+      for(const alternative of alternatives){
+        option(alternative,()=>{
+          const trailing=sentence.textContent.endsWith(' ')?' ':'';
+          sentence.textContent=alternative.trim()+trailing;
+          commitPreview(value);
+        });
+      }
+    }
+    if(word){
+      const id=String(Date.now())+Math.random().toString(36).slice(2);
+      section('单词候选：'+word.text);
+      const status=section('加载中…');
+      window.__MACTRANSLATE_WORD_REQUEST__={id,word:word.text};
+      window.__MACTRANSLATE_WORD_ANSWER__=(answerId,choices)=>{
+        if(answerId!==id||!popup.isConnected)return;
+        const notes=[];
+        if(!choices.ok)notes.push('谷歌翻译不可用：'+(choices.message||''));
+        else{
+          if(choices.meanings.length)notes.push('释义：'+choices.meanings.join('，'));
+          if(!choices.synonyms.length)notes.push('没有近义词');
+        }
+        status.textContent=notes.join(' · ');
+        for(const synonym of choices.synonyms||[]){
+          option(synonym,()=>{
+            if(word.node.isConnected&&word.node.textContent.slice(word.start,word.end)===word.text){
+              word.node.textContent=word.node.textContent.slice(0,word.start)+synonym+word.node.textContent.slice(word.end);
+            }
+            commitPreview(value);
+          });
+        }
+      };
+    }
+    if(!sentence&&!word)return;
+    (document.body||document.documentElement).appendChild(popup);
+    const rect=popup.getBoundingClientRect();
+    popup.style.left=Math.max(8,Math.min(x,innerWidth-rect.width-8))+'px';
+    popup.style.top=(y+16+rect.height<innerHeight?y+16:Math.max(8,y-rect.height-8))+'px';
+  };
+  if(!window.__MACTRANSLATE_CHOICES_R31__){
+    window.__MACTRANSLATE_CHOICES_R31__=true;
+    document.addEventListener('mousedown',event=>{
+      if(event.target.closest?.('.mactranslate-choices'))return;
+      const value=event.target.closest?.('.mactranslate-composer-translation-text');
+      if(!value){closeChoices();return;}
+      const sentence=event.target.closest?.('.mactranslate-sentence');
+      const {clientX,clientY}=event;
+      setTimeout(()=>openChoices(value,sentence,clientX,clientY),0);
+    },true);
+    document.addEventListener('keydown',event=>{if(event.key==='Escape')closeChoices();},true);
+  }
   if(!window.__MACTRANSLATE_COMPOSER_BRIDGE_R14__){
     window.__MACTRANSLATE_COMPOSER_BRIDGE_R14__=true;
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;
@@ -376,8 +475,8 @@ const composerBridgeScript = (service: string) =>
       if(direction!=='zh-en')return;
       event.preventDefault();
       event.stopImmediatePropagation();
+      if(!previewShowing(node,text)){updatePreview(node,'','busy',direction,false);return;}
       window.__MACTRANSLATE_PENDING_SEND_R14__={mode:'keyboard',source:text};
-      updatePreview(node,'','busy',direction,false);
     },true);
     document.addEventListener('click',event=>{
       if(window.__MACTRANSLATE_SEND_BYPASS_R14__)return;
@@ -390,8 +489,8 @@ const composerBridgeScript = (service: string) =>
       if(direction!=='zh-en')return;
       event.preventDefault();
       event.stopImmediatePropagation();
+      if(!previewShowing(node,text)){updatePreview(node,'','busy',direction,false);return;}
       window.__MACTRANSLATE_PENDING_SEND_R14__={mode:'click',source:text};
-      updatePreview(node,'','busy',direction,false);
     },true);
   }
   const node=composer();
@@ -407,7 +506,11 @@ const composerBridgeScript = (service: string) =>
   }else{
     const preview=ensurePreview(node);
     const ready=node.dataset.mactranslateTranslatedSource===text&&Boolean(node.dataset.mactranslateTranslatedText);
-    if(!ready)updatePreview(node,'','busy',direction,false);
+    if(preview?.dataset.mactranslateBlockedSource===text){
+      const blockedLabel=preview.querySelector('.mactranslate-composer-translation-label');
+      if(blockedLabel)blockedLabel.textContent=directionLabel(direction)+' · 翻译失败，不能发送';
+    }
+    else if(!ready)updatePreview(node,'','busy',direction,false);
     else updatePreview(node,'','ready',direction,false);
     if(preview&&preview.dataset.mactranslateAppliedSource!==text&&ready){
       const value=preview.querySelector('.mactranslate-composer-translation-text');
@@ -421,7 +524,10 @@ const composerBridgeScript = (service: string) =>
   const preview=document.querySelector('.mactranslate-composer-translation');
   const appliedReady=preview?.dataset.mactranslateAppliedSource===text&&Boolean(preview?.dataset.mactranslateAppliedText);
   const activePending=window.__MACTRANSLATE_PENDING_SEND_R14__;
+  const wordRequest=window.__MACTRANSLATE_WORD_REQUEST__||null;
+  window.__MACTRANSLATE_WORD_REQUEST__=null;
   return {
+    wordRequest,
     text:text.slice(0,20000),
     direction,
     isComposing,
@@ -431,10 +537,46 @@ const composerBridgeScript = (service: string) =>
 })()
 `;
 
+const wordAnswerScript = (id: string, choices: GoogleWordChoices) =>
+  `window.__MACTRANSLATE_WORD_ANSWER__?.(${JSON.stringify(id)},${JSON.stringify(choices)});`;
+
+// Chinese in the composer goes through Google (sentence alternatives, like
+// translate.google.com); macOS Translation is the fallback without choices.
+const translateComposer = async (
+  text: string,
+  direction: string,
+): Promise<ComposerTranslation | undefined> => {
+  if (direction === 'zh-en') {
+    const google = await googleTranslateWithAlternatives(text);
+    if (google.ok) {
+      return {
+        id: 'composer',
+        originalText: text,
+        status: 'ok',
+        translatedText: google.sentences.map(item => item.translation).join(''),
+        sourceLanguage: 'zh-Hans',
+        targetLanguage: 'en',
+        engine: 'Google',
+        sentences: google.sentences,
+      };
+    }
+  }
+  const response = await translateWithMacOS([{ id: 'composer', text }], {
+    lane: 'interactive',
+  });
+  return (
+    response.results?.find(item => item.id === 'composer') ?? {
+      id: 'composer',
+      status: 'translationError',
+      message: response.message || '系统翻译失败',
+    }
+  );
+};
+
 const composerApplyScript = (
   service: string,
   sourceText: string,
-  translated: MacOSTranslationResult,
+  translated: ComposerTranslation,
 ) => String.raw`
 (() => {
   const service=${JSON.stringify(service)};
@@ -483,20 +625,35 @@ const composerApplyScript = (
     : /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(translated.translatedText) ? '译文仍含中文' : '';
   if(blocked){
     if(label)label.textContent=direction+' · macOS';
-    if(value)value.textContent='未发送：'+blocked;
-    if(preview)preview.style.borderLeftColor='#ff9f0a';
+    if(value)value.textContent='无法发送：'+blocked;
+    if(preview){preview.style.borderLeftColor='#ff9f0a';preview.dataset.mactranslateBlockedSource=sourceText;}
     // Only English may be sent: Chinese that cannot be fully translated is blocked.
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;
     return {applied:true};
   }
   node.dataset.mactranslateTranslatedSource=sourceText;
   node.dataset.mactranslateTranslatedText=translated.translatedText;
-  if(label)label.textContent=direction+' · macOS';
-  if(value)value.textContent=translated.translatedText;
+  if(label)label.textContent=direction+' · '+(translated.engine||'macOS');
   if(preview){
     preview.style.borderLeftColor='#0a84ff';
-    preview.dataset.mactranslateAppliedText=translated.translatedText;
-    preview.dataset.mactranslateAppliedSource=sourceText;
+    delete preview.dataset.mactranslateBlockedSource;
+    preview.dataset.mactranslateEngine=translated.engine||'macOS';
+    if(preview.dataset.mactranslateAppliedSource!==sourceText){
+      if(value){
+        value.textContent='';
+        if(Array.isArray(translated.sentences)&&translated.sentences.length){
+          for(const sentence of translated.sentences){
+            const span=document.createElement('span');
+            span.className='mactranslate-sentence';
+            span.dataset.alternatives=JSON.stringify(sentence.alternatives||[]);
+            span.textContent=sentence.translation;
+            value.appendChild(span);
+          }
+        }else value.textContent=translated.translatedText;
+      }
+      preview.dataset.mactranslateAppliedText=translated.translatedText;
+      preview.dataset.mactranslateAppliedSource=sourceText;
+    }
   }
   const pendingState=window.__MACTRANSLATE_PENDING_SEND_R14__;
   const pending=pendingState?.source===sourceText?String(pendingState.mode||''):'';
@@ -505,8 +662,8 @@ const composerApplyScript = (
     ? preview.dataset.mactranslateAppliedText
     : translated.translatedText;
   if(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(outgoing)){
-    if(value)value.textContent='未发送：译文仍含中文';
-    if(preview)preview.style.borderLeftColor='#ff9f0a';
+    if(value)value.textContent='无法发送：译文仍含中文';
+    if(preview){preview.style.borderLeftColor='#ff9f0a';preview.dataset.mactranslateBlockedSource=sourceText;}
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;
     return {applied:true};
   }
@@ -597,21 +754,29 @@ const processComposer = async (service: string, contents: WebContents) => {
       composerBridgeScript(service),
       true,
     );
+    if (state?.wordRequest) {
+      const choices = await googleWordChoices(state.wordRequest.word);
+      if (contents.isDestroyed()) return;
+      await contents.executeJavaScript(
+        wordAnswerScript(state.wordRequest.id, choices),
+        true,
+      );
+    }
     const text = String(state?.text ?? '').trim();
     if (!text || !state?.direction) return;
+    if (text !== target.composerText) {
+      target.composerText = text;
+      target.composerTextAt = Date.now();
+    }
+    if (!state.pendingSend && Date.now() - target.composerTextAt < COMPOSER_SETTLE_MS) {
+      return;
+    }
     // Signal's IME composition must finish before we touch its composer.
     if (service === 'signal' && state.isComposing) return;
     if (state.translationReady && !state.pendingSend) return;
 
-    const response = await translateWithMacOS([{ id: 'composer', text }], {
-      lane: 'interactive',
-    });
-    const result = response.results?.find(item => item.id === 'composer') ?? {
-      id: 'composer',
-      status: 'translationError',
-      message: response.message || '系统翻译失败',
-    };
-    if (contents.isDestroyed()) return;
+    const result = await translateComposer(text, state.direction);
+    if (!result || contents.isDestroyed()) return;
 
     const applied: ComposerApplyResult | null = await contents.executeJavaScript(
       composerApplyScript(service, text, result),
@@ -760,6 +925,8 @@ export const armLiveMessageTranslation = (
       inputListener: null,
       cache: new Map(),
       failedUntil: new Map(),
+      composerText: '',
+      composerTextAt: 0,
     };
     liveTargets.set(contents.id, target);
   }
