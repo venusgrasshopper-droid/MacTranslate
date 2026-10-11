@@ -854,7 +854,7 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
     body:text(r.text || r.body || r.messageText || r.content || '')
   })).filter(m => !(m.service === 'signal' && m.providerEvent === 'signal-8.17.0-rendered-dom-readonly'));
 
-  const normalizedTitle = v => text(v).normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF\uFE0F]/g,'').replace(/\s+/g,' ').trim().replace(/[.·•]+$/g,'').trim().toLocaleLowerCase();
+  const normalizedTitle = v => text(v).normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF\uFE0F]/g,'').replace(/\\s+/g,' ').trim().replace(/[.·•]+$/g,'').trim().toLocaleLowerCase();
   const archiveConversationKey = m => m.service === 'teams' && normalizedTitle(m.conversation)
     ? 'teams-title:' + normalizedTitle(m.conversation)
     : m.conversationId;
