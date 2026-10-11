@@ -2,7 +2,8 @@
 
 import { Buffer } from 'node:buffer';
 import { existsSync } from 'node:fs';
-import { shell, WebContentsView, type BrowserWindow } from 'electron';
+import { Menu, shell, WebContentsView, type BrowserWindow } from 'electron';
+import { signalContextMenuTemplate } from './signalContextMenu';
 import {
   bindSignalWebContents,
   embeddedSignalPreparationError,
@@ -215,6 +216,13 @@ class SignalAccountView {
         void shell.openExternal(url);
       }
       return { action: 'deny' };
+    });
+
+    contents.on('context-menu', (_event, params) => {
+      const template = signalContextMenuTemplate(contents, params);
+      if (template.length > 0) {
+        Menu.buildFromTemplate(template).popup({ window: this.parentWindow });
+      }
     });
 
     contents.on('will-navigate', (event, url) => {

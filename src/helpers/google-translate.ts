@@ -1,8 +1,7 @@
 import { net } from 'electron';
 
-// All translation goes through Google Translate's free web endpoint. Besides
-// the translation it returns alternative translations per sentence (dt=at)
-// and, for single words, synonyms (dt=ss) and dictionary meanings (dt=bd).
+// All translation goes through Google Translate's free web endpoint, which
+// also returns alternative translations per sentence (dt=at).
 const ENDPOINT = 'https://translate.googleapis.com/translate_a/single';
 const TIMEOUT_MS = 8000;
 const CACHE_LIMIT = 500;
@@ -43,16 +42,8 @@ export interface GoogleTranslation {
   message?: string;
 }
 
-export interface GoogleWordChoices {
-  ok: boolean;
-  synonyms: string[];
-  meanings: string[];
-  message?: string;
-}
-
 const translationCache = new Map<string, GoogleTranslation>();
 const textCache = new Map<string, Omit<TranslationResult, 'id' | 'originalText'>>();
-const wordCache = new Map<string, GoogleWordChoices>();
 
 const remember = <T>(cache: Map<string, T>, key: string, value: T) => {
   cache.delete(key);
@@ -125,51 +116,6 @@ export const googleTranslateWithAlternatives = async (
     return {
       ok: false,
       sentences: [],
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-};
-
-export const googleWordChoices = async (
-  word: string,
-): Promise<GoogleWordChoices> => {
-  const key = word.toLowerCase();
-  const cached = wordCache.get(key);
-  if (cached) return cached;
-  try {
-    const data = await request({ sl: 'en', tl: 'zh-CN', q: word }, [
-      't',
-      'ss',
-      'bd',
-    ]);
-    const synonyms: string[] = [];
-    for (const synset of data.synsets ?? []) {
-      for (const entry of synset.entry ?? []) {
-        for (const synonym of entry.synonym ?? []) {
-          if (!synonyms.includes(synonym) && synonym.toLowerCase() !== key) {
-            synonyms.push(synonym);
-          }
-        }
-      }
-    }
-    const meanings: string[] = [];
-    for (const entry of data.dict ?? []) {
-      for (const term of entry.terms ?? []) {
-        if (!meanings.includes(term)) meanings.push(term);
-      }
-    }
-    const result = {
-      ok: true,
-      synonyms: synonyms.slice(0, 12),
-      meanings: meanings.slice(0, 6),
-    };
-    remember(wordCache, key, result);
-    return result;
-  } catch (error) {
-    return {
-      ok: false,
-      synonyms: [],
-      meanings: [],
       message: error instanceof Error ? error.message : String(error),
     };
   }

@@ -1,9 +1,7 @@
 import type { Input, WebContents } from 'electron';
 import {
   type GoogleSentence,
-  type GoogleWordChoices,
   googleTranslateWithAlternatives,
-  googleWordChoices,
   type TranslationResult,
   translateWithGoogle,
 } from '../../helpers/google-translate';
@@ -18,7 +16,6 @@ interface ScannedMessage {
 }
 
 interface ComposerState {
-  wordRequest?: { id: string; word: string } | null;
   text?: string;
   direction?: string;
   isComposing?: boolean;
@@ -33,9 +30,13 @@ interface ComposerApplyResult {
   y?: number;
 }
 
+type ComposerSentence = GoogleSentence & {
+  choices: Array<{ text: string; meaning: string }>;
+};
+
 type ComposerTranslation = TranslationResult & {
   engine?: string;
-  sentences?: GoogleSentence[];
+  sentences?: ComposerSentence[];
 };
 
 interface LiveTarget {
@@ -343,7 +344,7 @@ const composerBridgeScript = (service: string) =>
     const value=preview.querySelector('.mactranslate-composer-translation-text');
     const base=direction?directionLabel(direction):'中英自动翻译';
     const engine=preview.dataset.mactranslateEngine||'Google';
-    if(label)label.textContent=state==='busy'?base+' · 翻译中…':base+' · '+engine+(direction==='zh-en'?' · 点击译文可换词/换句，检查无误后按回车发送':'');
+    if(label)label.textContent=state==='busy'?base+' · 翻译中…':base+' · '+engine+(direction==='zh-en'?' · 点击句子可换其他译法，检查无误后按回车发送':'');
     if(value&&replaceValue)value.textContent=text;
   };
   // The user must have seen the translation of exactly this text before it can be sent.
@@ -363,75 +364,39 @@ const composerBridgeScript = (service: string) =>
     closeChoices();
     active?.focus();
   };
-  const isWordChar=c=>/[A-Za-z0-9'’-]/.test(c||'');
-  // Google-style choices for the clicked sentence and the word under the pointer.
+  // Google Translate style: the clicked sentence's alternative translations,
+  // each with its Chinese meaning.
   const openChoices=(value,sentence,x,y)=>{
     closeChoices();
+    if(!sentence)return;
+    const choices=JSON.parse(sentence.dataset.choices||'[]');
+    if(!choices.length)return;
+    const current=sentence.textContent.trim();
     const popup=document.createElement('div');
     popup.className='mactranslate-choices';
-    popup.style.cssText='position:fixed;z-index:2147483647;max-width:420px;max-height:50vh;overflow:auto;padding:6px 0;border-radius:8px;background:#fff;color:#111;box-shadow:0 6px 24px rgba(0,0,0,.25);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
-    const section=title=>{const h=document.createElement('div');h.textContent=title;h.style.cssText='padding:4px 12px;font-size:11px;color:#666;';popup.appendChild(h);return h;};
-    const option=(text,onPick)=>{
+    popup.style.cssText='position:fixed;z-index:2147483647;max-width:440px;max-height:50vh;overflow:auto;padding:4px 0;border-radius:8px;background:#fff;color:#111;box-shadow:0 6px 24px rgba(0,0,0,.25);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+    for(const choice of choices){
+      const selected=choice.text.trim()===current;
       const item=document.createElement('div');
       item.className='mactranslate-choice';
-      item.textContent=text;
-      item.style.cssText='padding:5px 12px;cursor:pointer;white-space:normal;';
-      item.addEventListener('mouseenter',()=>{item.style.background='rgba(10,132,255,.12)';});
-      item.addEventListener('mouseleave',()=>{item.style.background='';});
-      item.addEventListener('mousedown',event=>{event.preventDefault();event.stopPropagation();onPick();});
+      item.style.cssText='padding:6px 12px;cursor:pointer;'+(selected?'background:rgba(10,132,255,.10);':'');
+      const english=document.createElement('div');
+      english.textContent=(selected?'✓ ':'')+choice.text;
+      const meaning=document.createElement('div');
+      meaning.textContent=choice.meaning||'';
+      meaning.style.cssText='font-size:12px;color:#666;margin-top:1px;';
+      item.append(english,meaning);
+      item.addEventListener('mouseenter',()=>{item.style.background='rgba(10,132,255,.16)';});
+      item.addEventListener('mouseleave',()=>{item.style.background=selected?'rgba(10,132,255,.10)':'';});
+      item.addEventListener('mousedown',event=>{
+        event.preventDefault();
+        event.stopPropagation();
+        const trailing=sentence.textContent.endsWith(' ')?' ':'';
+        sentence.textContent=choice.text.trim()+trailing;
+        commitPreview(value);
+      });
       popup.appendChild(item);
-      return item;
-    };
-    let word=null;
-    const caret=document.caretRangeFromPoint?.(x,y);
-    const node=caret?.startContainer;
-    if(node?.nodeType===3&&value.contains(node)){
-      const text=node.textContent;
-      let start=caret.startOffset;
-      let end=caret.startOffset;
-      while(start>0&&isWordChar(text[start-1]))start--;
-      while(end<text.length&&isWordChar(text[end]))end++;
-      while(start<end&&/['’-]/.test(text[start]))start++;
-      while(end>start&&/['’-]/.test(text[end-1]))end--;
-      if(/[A-Za-z]/.test(text.slice(start,end)))word={node,start,end,text:text.slice(start,end)};
     }
-    if(sentence){
-      const current=sentence.textContent.trim();
-      const alternatives=JSON.parse(sentence.dataset.alternatives||'[]').filter(item=>item.trim()!==current);
-      section(alternatives.length?'整句候选':'整句候选：没有其他译法');
-      for(const alternative of alternatives){
-        option(alternative,()=>{
-          const trailing=sentence.textContent.endsWith(' ')?' ':'';
-          sentence.textContent=alternative.trim()+trailing;
-          commitPreview(value);
-        });
-      }
-    }
-    if(word){
-      const id=String(Date.now())+Math.random().toString(36).slice(2);
-      section('单词候选：'+word.text);
-      const status=section('加载中…');
-      window.__MACTRANSLATE_WORD_REQUEST__={id,word:word.text};
-      window.__MACTRANSLATE_WORD_ANSWER__=(answerId,choices)=>{
-        if(answerId!==id||!popup.isConnected)return;
-        const notes=[];
-        if(!choices.ok)notes.push('谷歌翻译不可用：'+(choices.message||''));
-        else{
-          if(choices.meanings.length)notes.push('释义：'+choices.meanings.join('，'));
-          if(!choices.synonyms.length)notes.push('没有近义词');
-        }
-        status.textContent=notes.join(' · ');
-        for(const synonym of choices.synonyms||[]){
-          option(synonym,()=>{
-            if(word.node.isConnected&&word.node.textContent.slice(word.start,word.end)===word.text){
-              word.node.textContent=word.node.textContent.slice(0,word.start)+synonym+word.node.textContent.slice(word.end);
-            }
-            commitPreview(value);
-          });
-        }
-      };
-    }
-    if(!sentence&&!word)return;
     (document.body||document.documentElement).appendChild(popup);
     const rect=popup.getBoundingClientRect();
     popup.style.left=Math.max(8,Math.min(x,innerWidth-rect.width-8))+'px';
@@ -568,10 +533,7 @@ const composerBridgeScript = (service: string) =>
   const preview=document.querySelector('.mactranslate-composer-translation');
   const appliedReady=preview?.dataset.mactranslateAppliedSource===text&&Boolean(preview?.dataset.mactranslateAppliedText);
   const activePending=window.__MACTRANSLATE_PENDING_SEND_R14__;
-  const wordRequest=window.__MACTRANSLATE_WORD_REQUEST__||null;
-  window.__MACTRANSLATE_WORD_REQUEST__=null;
   return {
-    wordRequest,
     text:text.slice(0,20000),
     direction,
     isComposing,
@@ -580,9 +542,6 @@ const composerBridgeScript = (service: string) =>
   };
 })()
 `;
-
-const wordAnswerScript = (id: string, choices: GoogleWordChoices) =>
-  `window.__MACTRANSLATE_WORD_ANSWER__?.(${JSON.stringify(id)},${JSON.stringify(choices)});`;
 
 // Chinese in the composer comes with Google's sentence alternatives, like
 // translate.google.com; English only gets a reference translation.
@@ -602,6 +561,22 @@ const translateComposer = async (
       message: `谷歌翻译不可用：${google.message ?? ''}`,
     };
   }
+  // Back-translate every alternative so each choice shows its Chinese meaning.
+  const alternatives = [
+    ...new Set(google.sentences.flatMap(item => item.alternatives)),
+  ];
+  const meanings = await translateWithGoogle(
+    alternatives.map((alternative, index) => ({
+      id: String(index),
+      text: alternative,
+    })),
+  );
+  const meaningOf = new Map(
+    alternatives.map((alternative, index) => {
+      const result = meanings.results[index];
+      return [alternative, result?.status === 'ok' ? result.translatedText ?? '' : ''];
+    }),
+  );
   return {
     id: 'composer',
     originalText: text,
@@ -610,7 +585,13 @@ const translateComposer = async (
     sourceLanguage: 'zh-Hans',
     targetLanguage: 'en',
     engine: 'Google',
-    sentences: google.sentences,
+    sentences: google.sentences.map(item => ({
+      ...item,
+      choices: item.alternatives.map(alternative => ({
+        text: alternative,
+        meaning: meaningOf.get(alternative) ?? '',
+      })),
+    })),
   };
 };
 
@@ -695,7 +676,7 @@ const composerApplyScript = (
           for(const sentence of translated.sentences){
             const span=document.createElement('span');
             span.className='mactranslate-sentence';
-            span.dataset.alternatives=JSON.stringify(sentence.alternatives||[]);
+            span.dataset.choices=JSON.stringify(sentence.choices||[]);
             span.textContent=sentence.translation;
             value.appendChild(span);
           }
@@ -804,14 +785,6 @@ const processComposer = async (service: string, contents: WebContents) => {
       composerBridgeScript(service),
       true,
     );
-    if (state?.wordRequest) {
-      const choices = await googleWordChoices(state.wordRequest.word);
-      if (contents.isDestroyed()) return;
-      await contents.executeJavaScript(
-        wordAnswerScript(state.wordRequest.id, choices),
-        true,
-      );
-    }
     const text = String(state?.text ?? '').trim();
     if (!text || !state?.direction) return;
     if (text !== target.composerText) {
