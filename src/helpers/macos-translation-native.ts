@@ -1,5 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { release } from 'node:os';
 import { join } from 'node:path';
 import { app } from 'electron';
 
@@ -34,6 +35,12 @@ const HELPER_NAME = 'mactranslate-translation-helper';
 const PERSISTENT_SERVER_UNAVAILABLE =
   'MACTRANSLATE_PERSISTENT_SERVER_REQUIRES_MACOS_26';
 const PERSISTENT_REQUEST_TIMEOUT_MS = 30_000;
+// Apple's Translation framework (and the helper) need macOS 15, i.e. Darwin 24.
+const MIN_DARWIN_MAJOR = 24;
+const UNSUPPORTED_SYSTEM_MESSAGE =
+  '系统翻译需要 macOS 15 或更新版本，请先升级 macOS';
+const systemSupportsTranslation = () =>
+  Number.parseInt(release(), 10) >= MIN_DARWIN_MAJOR;
 const ONE_SHOT_TIMEOUT_MS = 120_000;
 
 const bundledHelperPath = () =>
@@ -309,7 +316,7 @@ const runTranslationHelperOneShot = async (
   });
 
 export const warmMacOSTranslationHelper = (): void => {
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin' || !systemSupportsTranslation()) return;
   try {
     const helperPath = executableHelperPath();
     if (!existsSync(helperPath)) return;
@@ -330,6 +337,18 @@ export const translateWithMacOS = async (
       engine: 'macOS Translation',
       results: [],
       message: 'macOS 系统翻译仅支持 macOS',
+    };
+  }
+  if (!systemSupportsTranslation()) {
+    return {
+      ok: true,
+      engine: 'macOS Translation',
+      results: items.map(item => ({
+        id: item.id,
+        originalText: item.text,
+        status: 'unsupportedSystem',
+        message: UNSUPPORTED_SYSTEM_MESSAGE,
+      })),
     };
   }
   let helperPath: string;

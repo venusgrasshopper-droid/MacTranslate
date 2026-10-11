@@ -482,8 +482,20 @@ const composerApplyScript = (
     if(label)label.textContent=direction+' · macOS';
     if(value)value.textContent=translated.message||'系统翻译失败';
     if(preview)preview.style.borderLeftColor='#ff9f0a';
+    // Translation failed: send what the user typed instead of swallowing the send.
+    const failedState=window.__MACTRANSLATE_PENDING_SEND_R14__;
+    const failedPending=failedState?.source===sourceText?String(failedState.mode||''):'';
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;
-    return {applied:true};
+    if(!failedPending)return {applied:true};
+    node.focus();
+    window.__MACTRANSLATE_SEND_BYPASS_R14__=true;
+    setTimeout(()=>{window.__MACTRANSLATE_SEND_BYPASS_R14__=false;},900);
+    if(failedPending==='click'){
+      const button=sendButton();
+      const rect=button?.getBoundingClientRect?.();
+      if(rect&&rect.width>0&&rect.height>0)return {applied:true,send:'click',x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+    }
+    return {applied:true,send:'keyboard'};
   }
   node.dataset.mactranslateTranslatedSource=sourceText;
   node.dataset.mactranslateTranslatedText=translated.translatedText;
@@ -596,8 +608,12 @@ const processComposer = async (service: string, contents: WebContents) => {
     const response = await translateWithMacOS([{ id: 'composer', text }], {
       lane: 'interactive',
     });
-    const result = response.results?.find(item => item.id === 'composer');
-    if (!result || contents.isDestroyed()) return;
+    const result = response.results?.find(item => item.id === 'composer') ?? {
+      id: 'composer',
+      status: 'translationError',
+      message: response.message || '系统翻译失败',
+    };
+    if (contents.isDestroyed()) return;
 
     const applied: ComposerApplyResult | null = await contents.executeJavaScript(
       composerApplyScript(service, text, result),
@@ -669,7 +685,11 @@ const processTarget = async (service: string, contents: WebContents) => {
       const text = String(message?.text ?? '').trim();
       if (!translatableText(text) || message.hasTranslation) continue;
       const known = target.cache.get(text) ?? globalTranslations.get(text);
-      if (known?.status === 'ok' || known?.status === 'languagePackRequired') {
+      if (
+        known?.status === 'ok' ||
+        known?.status === 'languagePackRequired' ||
+        known?.status === 'unsupportedSystem'
+      ) {
         await contents.executeJavaScript(
           applyScript(service, message, known),
           true,
@@ -700,7 +720,11 @@ const processTarget = async (service: string, contents: WebContents) => {
       }
       target.cache.set(text, result);
       rememberGlobal(text, result);
-      if (result.status !== 'ok' && result.status !== 'languagePackRequired') {
+      if (
+        result.status !== 'ok' &&
+        result.status !== 'languagePackRequired' &&
+        result.status !== 'unsupportedSystem'
+      ) {
         target.failedUntil.set(text, Date.now() + 15_000);
         continue;
       }

@@ -252,6 +252,35 @@ func withTimeout<T>(_ operation: @escaping @MainActor () async throws -> T) asyn
 
 // MARK: - Request processing
 
+/// Pairs this process has already confirmed as not installed.
+@MainActor var confirmedMissingPairs: [LanguagePair: Date] = [:]
+let coldStartRecheckAttempts = 10
+let coldStartRecheckIntervalNanoseconds: UInt64 = 500_000_000
+let confirmedMissingTTL: TimeInterval = 30
+
+/// Right after translationd (re)starts, LanguageAvailability reports installed
+/// pairs as `.supported` for 1-3 s. Re-check for up to 5 s before telling the
+/// user to download a language pack; remember a confirmed miss for 30 s so
+/// genuinely missing packs are not re-waited on every request.
+@MainActor
+func installedStatus(for pair: LanguagePair) async -> LanguageAvailability.Status {
+  let availability = LanguageAvailability()
+  let source = Locale.Language(identifier: pair.source)
+  let target = Locale.Language(identifier: pair.target)
+  var status = await availability.status(from: source, to: target)
+  if status != .supported { return status }
+  if let confirmed = confirmedMissingPairs[pair], Date().timeIntervalSince(confirmed) < confirmedMissingTTL {
+    return status
+  }
+  for _ in 0..<coldStartRecheckAttempts {
+    try? await Task.sleep(nanoseconds: coldStartRecheckIntervalNanoseconds)
+    status = await availability.status(from: source, to: target)
+    if status != .supported { return status }
+  }
+  confirmedMissingPairs[pair] = Date()
+  return status
+}
+
 @MainActor
 func translateItems(
   _ items: [TranslationInput],
@@ -273,13 +302,9 @@ func translateItems(
     groups[pair, default: []].append(index)
   }
 
-  let availability = LanguageAvailability()
   for pair in order {
     let indexes = groups[pair] ?? []
-    let status = await availability.status(
-      from: Locale.Language(identifier: pair.source),
-      to: Locale.Language(identifier: pair.target)
-    )
+    let status = await installedStatus(for: pair)
     let failure: (String, String)?
     switch status {
     case .installed:

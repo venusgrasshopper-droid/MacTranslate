@@ -970,7 +970,7 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
     for(let index=list.length-1;index>=0;index--){
       const m=list[index];
       const body=(m.body||'').trim();
-      if(!body || /^[[^]]+]$/.test(body) || seenBodies.has(body)) continue;
+      if(!body || /^\\[[^\\]]+\\]$/.test(body) || seenBodies.has(body)) continue;
       seenBodies.add(body);
       if(force && !pendingTranslations.has(body)){
         translationCache.delete(body);
@@ -978,7 +978,7 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
       }
       if(pendingTranslations.has(body)) continue;
       const existing=translationCache.get(body);
-      if(existing?.status==='ok' || existing?.status==='languagePackRequired' || existing?.status==='unsupportedLanguage' || existing?.status==='unsupportedPair') continue;
+      if(existing?.status==='ok' || existing?.status==='languagePackRequired' || existing?.status==='unsupportedLanguage' || existing?.status==='unsupportedPair' || existing?.status==='unsupportedSystem') continue;
       if(existing && (translationRetryAt.get(body)||0)>now) continue;
       if(existing) translationCache.delete(body);
       pendingTranslations.add(body);
@@ -1005,7 +1005,7 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
           const result=byId.get(String(item.id));
           if(result){
             translationCache.set(item.text,result);
-            if(result.status==='ok' || result.status==='languagePackRequired' || result.status==='unsupportedLanguage' || result.status==='unsupportedPair') translationRetryAt.delete(item.text);
+            if(result.status==='ok' || result.status==='languagePackRequired' || result.status==='unsupportedLanguage' || result.status==='unsupportedPair' || result.status==='unsupportedSystem') translationRetryAt.delete(item.text);
             else translationRetryAt.set(item.text,Date.now()+2500);
           }else{
             translationRetryAt.set(item.text,Date.now()+2500);
