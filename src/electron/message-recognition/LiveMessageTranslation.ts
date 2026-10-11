@@ -373,7 +373,7 @@ const composerBridgeScript = (service: string) =>
       if(!node||!(event.target===node||node.contains?.(event.target)))return;
       const text=read(node);
       const direction=directionFor(text);
-      if(!direction)return;
+      if(direction!=='zh-en')return;
       event.preventDefault();
       event.stopImmediatePropagation();
       window.__MACTRANSLATE_PENDING_SEND_R14__={mode:'keyboard',source:text};
@@ -387,7 +387,7 @@ const composerBridgeScript = (service: string) =>
       if(!node)return;
       const text=read(node);
       const direction=directionFor(text);
-      if(!direction)return;
+      if(direction!=='zh-en')return;
       event.preventDefault();
       event.stopImmediatePropagation();
       window.__MACTRANSLATE_PENDING_SEND_R14__={mode:'click',source:text};
@@ -478,24 +478,16 @@ const composerApplyScript = (
   const value=preview?.querySelector('.mactranslate-composer-translation-text');
   const label=preview?.querySelector('.mactranslate-composer-translation-label');
   const direction=translated.sourceLanguage?.startsWith('zh')?'中文 → English':'English → 中文';
-  if(translated.status!=='ok'||!translated.translatedText){
+  const blocked=translated.status!=='ok'||!translated.translatedText
+    ? (translated.message||'系统翻译失败')
+    : /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(translated.translatedText) ? '译文仍含中文' : '';
+  if(blocked){
     if(label)label.textContent=direction+' · macOS';
-    if(value)value.textContent=translated.message||'系统翻译失败';
+    if(value)value.textContent='未发送：'+blocked;
     if(preview)preview.style.borderLeftColor='#ff9f0a';
-    // Translation failed: send what the user typed instead of swallowing the send.
-    const failedState=window.__MACTRANSLATE_PENDING_SEND_R14__;
-    const failedPending=failedState?.source===sourceText?String(failedState.mode||''):'';
+    // Only English may be sent: Chinese that cannot be fully translated is blocked.
     window.__MACTRANSLATE_PENDING_SEND_R14__=null;
-    if(!failedPending)return {applied:true};
-    node.focus();
-    window.__MACTRANSLATE_SEND_BYPASS_R14__=true;
-    setTimeout(()=>{window.__MACTRANSLATE_SEND_BYPASS_R14__=false;},900);
-    if(failedPending==='click'){
-      const button=sendButton();
-      const rect=button?.getBoundingClientRect?.();
-      if(rect&&rect.width>0&&rect.height>0)return {applied:true,send:'click',x:rect.left+rect.width/2,y:rect.top+rect.height/2};
-    }
-    return {applied:true,send:'keyboard'};
+    return {applied:true};
   }
   node.dataset.mactranslateTranslatedSource=sourceText;
   node.dataset.mactranslateTranslatedText=translated.translatedText;
@@ -512,6 +504,12 @@ const composerApplyScript = (
   const outgoing=preview?.dataset.mactranslateAppliedSource===sourceText&&preview?.dataset.mactranslateAppliedText
     ? preview.dataset.mactranslateAppliedText
     : translated.translatedText;
+  if(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(outgoing)){
+    if(value)value.textContent='未发送：译文仍含中文';
+    if(preview)preview.style.borderLeftColor='#ff9f0a';
+    window.__MACTRANSLATE_PENDING_SEND_R14__=null;
+    return {applied:true};
+  }
   const replaceText=text=>{
     node.focus();
     if(node instanceof HTMLInputElement||node instanceof HTMLTextAreaElement){
