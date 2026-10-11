@@ -23,7 +23,7 @@ import {
   SEARCH_ENGINE_URLS,
   TRANSLATOR_ENGINE_GOOGLE,
   TRANSLATOR_ENGINE_LIBRETRANSLATE,
-  TRANSLATOR_ENGINE_MACOS,
+  TRANSLATOR_ENGINE_AUTO,
 } from '../config';
 import { openExternalUrl } from '../helpers/url-helpers';
 import type IContextMenuParams from '../models/IContextMenuParams';
@@ -654,9 +654,9 @@ export class ContextMenuBuilder {
       translatePopup(translatedText.text, translatedText.error);
     };
 
-    if (translatorEngine === TRANSLATOR_ENGINE_MACOS) {
+    if (translatorEngine === TRANSLATOR_ENGINE_AUTO) {
       const macOSTranslateItem = new MenuItem({
-        label: '自动中英互译（macOS）',
+        label: '自动中英互译（谷歌）',
         click: () => {
           generateTranslationItems('auto-zh-en', translatorEngine);
         },

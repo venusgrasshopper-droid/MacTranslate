@@ -1,15 +1,12 @@
 import type { Input, WebContents } from 'electron';
 import {
-  type MacOSTranslationResult,
-  translateWithMacOS,
-  warmMacOSTranslationHelper,
-} from '../../helpers/macos-translation-native';
-import {
   type GoogleSentence,
   type GoogleWordChoices,
   googleTranslateWithAlternatives,
   googleWordChoices,
-} from '../../helpers/google-translate-alternatives';
+  type TranslationResult,
+  translateWithGoogle,
+} from '../../helpers/google-translate';
 
 // Live translation for chat webviews: incoming messages get a translation box
 // under the bubble, and the composer text is translated before it is sent.
@@ -36,7 +33,7 @@ interface ComposerApplyResult {
   y?: number;
 }
 
-type ComposerTranslation = MacOSTranslationResult & {
+type ComposerTranslation = TranslationResult & {
   engine?: string;
   sentences?: GoogleSentence[];
 };
@@ -50,14 +47,14 @@ interface LiveTarget {
   composerQueued: boolean;
   composerKickTimer: NodeJS.Timeout | null;
   inputListener: ((event: Electron.Event, input: Input) => void) | null;
-  cache: Map<string, MacOSTranslationResult>;
+  cache: Map<string, TranslationResult>;
   failedUntil: Map<string, number>;
   composerText: string;
   composerTextAt: number;
 }
 
 const liveTargets = new Map<number, LiveTarget>();
-const globalTranslations = new Map<string, MacOSTranslationResult>();
+const globalTranslations = new Map<string, TranslationResult>();
 const GLOBAL_TRANSLATION_LIMIT = 4000;
 const SCAN_LIMIT = 40;
 const BATCH_LIMIT = 12;
@@ -73,7 +70,7 @@ const translatableText = (value: string): boolean => {
   return /[A-Za-z\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(text);
 };
 
-const rememberGlobal = (text: string, result: MacOSTranslationResult) => {
+const rememberGlobal = (text: string, result: TranslationResult) => {
   globalTranslations.delete(text);
   globalTranslations.set(text, result);
   if (globalTranslations.size <= GLOBAL_TRANSLATION_LIMIT) return;
@@ -171,7 +168,7 @@ const scanScript = (service: string) => String.raw`
 const applyScript = (
   service: string,
   wanted: ScannedMessage,
-  translated: MacOSTranslationResult,
+  translated: TranslationResult,
 ) => String.raw`
 (() => {
   const service=${JSON.stringify(service)};
@@ -242,8 +239,8 @@ const applyScript = (
   box.dataset.mactranslateSource=wanted.text;
   const label=box.querySelector('.mactranslate-live-translation-label');
   const value=box.querySelector('.mactranslate-live-translation-text');
-  if(label)label.textContent=(translated.sourceLanguage||'auto')+' → '+(translated.targetLanguage||'')+' · macOS';
-  if(value)value.textContent=translated.status==='ok'?(translated.translatedText||''):(translated.message||'系统翻译失败');
+  if(label)label.textContent=(translated.sourceLanguage||'auto')+' → '+(translated.targetLanguage||'')+' · Google';
+  if(value)value.textContent=translated.status==='ok'?(translated.translatedText||''):(translated.message||'翻译失败');
   box.style.borderLeftColor=translated.status==='ok'?'#0a84ff':'#ff9f0a';
   return true;
 })()
@@ -345,7 +342,7 @@ const composerBridgeScript = (service: string) =>
     const label=preview.querySelector('.mactranslate-composer-translation-label');
     const value=preview.querySelector('.mactranslate-composer-translation-text');
     const base=direction?directionLabel(direction):'中英自动翻译';
-    const engine=preview.dataset.mactranslateEngine||'macOS';
+    const engine=preview.dataset.mactranslateEngine||'Google';
     if(label)label.textContent=state==='busy'?base+' · 翻译中…':base+' · '+engine+(direction==='zh-en'?' · 点击译文可换词/换句，检查无误后按回车发送':'');
     if(value&&replaceValue)value.textContent=text;
   };
@@ -540,37 +537,34 @@ const composerBridgeScript = (service: string) =>
 const wordAnswerScript = (id: string, choices: GoogleWordChoices) =>
   `window.__MACTRANSLATE_WORD_ANSWER__?.(${JSON.stringify(id)},${JSON.stringify(choices)});`;
 
-// Chinese in the composer goes through Google (sentence alternatives, like
-// translate.google.com); macOS Translation is the fallback without choices.
+// Chinese in the composer comes with Google's sentence alternatives, like
+// translate.google.com; English only gets a reference translation.
 const translateComposer = async (
   text: string,
   direction: string,
-): Promise<ComposerTranslation | undefined> => {
-  if (direction === 'zh-en') {
-    const google = await googleTranslateWithAlternatives(text);
-    if (google.ok) {
-      return {
-        id: 'composer',
-        originalText: text,
-        status: 'ok',
-        translatedText: google.sentences.map(item => item.translation).join(''),
-        sourceLanguage: 'zh-Hans',
-        targetLanguage: 'en',
-        engine: 'Google',
-        sentences: google.sentences,
-      };
-    }
+): Promise<ComposerTranslation> => {
+  if (direction !== 'zh-en') {
+    const response = await translateWithGoogle([{ id: 'composer', text }]);
+    return { ...response.results[0], engine: 'Google' };
   }
-  const response = await translateWithMacOS([{ id: 'composer', text }], {
-    lane: 'interactive',
-  });
-  return (
-    response.results?.find(item => item.id === 'composer') ?? {
+  const google = await googleTranslateWithAlternatives(text);
+  if (!google.ok) {
+    return {
       id: 'composer',
       status: 'translationError',
-      message: response.message || '系统翻译失败',
-    }
-  );
+      message: `谷歌翻译不可用：${google.message ?? ''}`,
+    };
+  }
+  return {
+    id: 'composer',
+    originalText: text,
+    status: 'ok',
+    translatedText: google.sentences.map(item => item.translation).join(''),
+    sourceLanguage: 'zh-Hans',
+    targetLanguage: 'en',
+    engine: 'Google',
+    sentences: google.sentences,
+  };
 };
 
 const composerApplyScript = (
@@ -619,12 +613,21 @@ const composerApplyScript = (
   if(!node||read(node)!==sourceText)return {applied:false};
   const value=preview?.querySelector('.mactranslate-composer-translation-text');
   const label=preview?.querySelector('.mactranslate-composer-translation-label');
-  const direction=translated.sourceLanguage?.startsWith('zh')?'中文 → English':'English → 中文';
-  const blocked=translated.status!=='ok'||!translated.translatedText
-    ? (translated.message||'系统翻译失败')
+  const chineseSource=/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(sourceText);
+  const direction=chineseSource?'中文 → English':'English → 中文';
+  const failed=translated.status!=='ok'||!translated.translatedText;
+  // English is sent as typed; only Chinese has to come out as clean English.
+  const blocked=!chineseSource?'':failed
+    ? (translated.message||'翻译失败')
     : /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u.test(translated.translatedText) ? '译文仍含中文' : '';
+  if(failed&&!chineseSource){
+    if(label)label.textContent=direction+' · Google';
+    if(value)value.textContent='参考译文失败：'+(translated.message||'翻译失败');
+    window.__MACTRANSLATE_PENDING_SEND_R14__=null;
+    return {applied:true};
+  }
   if(blocked){
-    if(label)label.textContent=direction+' · macOS';
+    if(label)label.textContent=direction+' · Google';
     if(value)value.textContent='无法发送：'+blocked;
     if(preview){preview.style.borderLeftColor='#ff9f0a';preview.dataset.mactranslateBlockedSource=sourceText;}
     // Only English may be sent: Chinese that cannot be fully translated is blocked.
@@ -633,11 +636,11 @@ const composerApplyScript = (
   }
   node.dataset.mactranslateTranslatedSource=sourceText;
   node.dataset.mactranslateTranslatedText=translated.translatedText;
-  if(label)label.textContent=direction+' · '+(translated.engine||'macOS');
+  if(label)label.textContent=direction+' · '+(translated.engine||'Google');
   if(preview){
     preview.style.borderLeftColor='#0a84ff';
     delete preview.dataset.mactranslateBlockedSource;
-    preview.dataset.mactranslateEngine=translated.engine||'macOS';
+    preview.dataset.mactranslateEngine=translated.engine||'Google';
     if(preview.dataset.mactranslateAppliedSource!==sourceText){
       if(value){
         value.textContent='';
@@ -867,9 +870,8 @@ const processTarget = async (service: string, contents: WebContents) => {
 
     const texts = [...waiting.keys()].slice(0, BATCH_LIMIT);
     if (!texts.length) return;
-    const response = await translateWithMacOS(
+    const response = await translateWithGoogle(
       texts.map((text, index) => ({ id: String(index), text })),
-      { lane: 'batch' },
     );
     const byId = new Map(
       (response.results ?? []).map(result => [String(result.id), result]),
@@ -937,7 +939,6 @@ export const armLiveMessageTranslation = (
     }, MESSAGE_POLL_MS);
   }
   if (!target.composerTimer) {
-    warmMacOSTranslationHelper();
     void processComposer(service, contents);
     target.composerTimer = setInterval(() => {
       void processComposer(service, contents);

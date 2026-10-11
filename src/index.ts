@@ -28,7 +28,7 @@ import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_SHORTCUTS,
   DEFAULT_WINDOW_OPTIONS,
-  TRANSLATOR_ENGINE_MACOS,
+  TRANSLATOR_ENGINE_AUTO,
 } from './config';
 
 import { altKey, isLinux, isMac, isWindows } from './environment';
@@ -60,7 +60,7 @@ import { appId } from './package.json';
 import { asarPath } from './helpers/asar-helpers';
 import { checkIfCertIsPresent } from './helpers/certs-helpers';
 import { translateTo } from './helpers/translation-helpers';
-import { translateWithMacOS } from './helpers/macos-translation-native';
+import { translateWithGoogle } from './helpers/google-translate';
 import { openExternalUrl } from './helpers/url-helpers';
 import userAgent from './helpers/userAgent-helpers';
 import generatedTranslations from './i18n/translations';
@@ -116,7 +116,7 @@ const settings = new Settings('app', DEFAULT_APP_SETTINGS);
 if (isMac && settings.get('macOSTranslationTrialConfigured') !== true) {
   settings.set({
     enableTranslator: true,
-    translatorEngine: TRANSLATOR_ENGINE_MACOS,
+    translatorEngine: TRANSLATOR_ENGINE_AUTO,
     macOSTranslationTrialConfigured: true,
   });
 }
@@ -986,7 +986,7 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
       unique.push({id:String(unique.length),text:body});
     }
     if(!unique.length) return;
-    translateStatus.textContent='macOS 系统翻译中…';
+    translateStatus.textContent='谷歌翻译中…';
     for(let offset=0;offset<unique.length;offset+=12){
       const chunk=unique.slice(offset,offset+12);
       let response;
@@ -1028,7 +1028,7 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
       else if(state?.status==='pending')pending++;
       else if(state)failed++;
     }
-    translateStatus.textContent='macOS 系统翻译 · 成功 '+completed+(pending?' · 翻译中 '+pending:'')+(failed?' · 未翻译 '+failed:'');
+    translateStatus.textContent='谷歌翻译 · 成功 '+completed+(pending?' · 翻译中 '+pending:'')+(failed?' · 未翻译 '+failed:'');
   }
   function renderMessages(preserveScroll=false){
     const previousScrollTop=messages.scrollTop;
@@ -1051,10 +1051,10 @@ input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;b
         const box=document.createElement('div'); box.className='translation '+(translated.status==='ok'?'ok':'error');
         const label=document.createElement('div'); label.className='translationLabel';
         if(translated.status==='ok'){
-          label.textContent=(translated.sourceLanguage||'自动识别')+' → '+(translated.targetLanguage||'目标语言')+' · macOS';
+          label.textContent=(translated.sourceLanguage||'自动识别')+' → '+(translated.targetLanguage||'目标语言')+' · Google';
           const value=document.createElement('div'); value.textContent=translated.translatedText||''; box.append(label,value);
         }else{
-          label.textContent='macOS 系统翻译';
+          label.textContent='谷歌翻译';
           const value=document.createElement('div'); value.textContent=translated.message||'暂时无法翻译'; box.append(label,value);
         }
         wrap.appendChild(box);
@@ -1160,7 +1160,7 @@ ipcMain.handle(
         text: String(item?.text ?? '').slice(0, 20_000),
       }))
       .filter(item => item.text.trim().length > 0);
-    return translateWithMacOS(normalized);
+    return translateWithGoogle(normalized);
   },
 );
 

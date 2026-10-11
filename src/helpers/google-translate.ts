@@ -1,11 +1,35 @@
 import { net } from 'electron';
 
-// Google Translate's public web endpoint: besides the translation it returns
-// alternative translations per sentence (dt=at) and, for single words,
-// synonyms (dt=ss) and dictionary meanings (dt=bd).
+// All translation goes through Google Translate's free web endpoint. Besides
+// the translation it returns alternative translations per sentence (dt=at)
+// and, for single words, synonyms (dt=ss) and dictionary meanings (dt=bd).
 const ENDPOINT = 'https://translate.googleapis.com/translate_a/single';
 const TIMEOUT_MS = 8000;
 const CACHE_LIMIT = 500;
+const CONCURRENCY = 4;
+const HAN = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/u;
+
+export interface TranslationItem {
+  id: string;
+  text: string;
+}
+
+export interface TranslationResult {
+  id: string;
+  originalText?: string;
+  status: string;
+  translatedText?: string;
+  sourceLanguage?: string;
+  targetLanguage?: string;
+  message?: string;
+}
+
+export interface TranslationResponse {
+  ok: boolean;
+  engine: string;
+  results: TranslationResult[];
+  message?: string;
+}
 
 export interface GoogleSentence {
   source: string;
@@ -27,6 +51,7 @@ export interface GoogleWordChoices {
 }
 
 const translationCache = new Map<string, GoogleTranslation>();
+const textCache = new Map<string, Omit<TranslationResult, 'id' | 'originalText'>>();
 const wordCache = new Map<string, GoogleWordChoices>();
 
 const remember = <T>(cache: Map<string, T>, key: string, value: T) => {
@@ -42,12 +67,16 @@ const request = async (
   params: Record<string, string>,
   dt: string[],
 ): Promise<any> => {
-  const query = new URLSearchParams({ client: 'gtx', dj: '1', ...params });
+  const { q, ...rest } = params;
+  const query = new URLSearchParams({ client: 'gtx', dj: '1', ...rest });
   for (const value of dt) query.append('dt', value);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
+    // POST keeps long messages out of the URL.
     const response = await net.fetch(`${ENDPOINT}?${query}`, {
+      method: 'POST',
+      body: new URLSearchParams({ q }),
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`谷歌翻译返回 HTTP ${response.status}`);
@@ -144,4 +173,67 @@ export const googleWordChoices = async (
       message: error instanceof Error ? error.message : String(error),
     };
   }
+};
+
+const languageLabel = (code: string) =>
+  code === 'zh-CN' ? 'zh-Hans' : code === 'zh-TW' ? 'zh-Hant' : code;
+
+// Chinese -> English, anything with Latin letters -> Chinese; other text is left alone.
+const translateText = async (
+  text: string,
+): Promise<Omit<TranslationResult, 'id' | 'originalText'>> => {
+  const trimmed = text.trim();
+  const cached = textCache.get(trimmed);
+  if (cached) return cached;
+  const chinese = HAN.test(trimmed);
+  if (!chinese && !/[A-Za-z]/.test(trimmed)) {
+    return { status: 'unsupportedLanguage', message: '当前只自动处理中英文' };
+  }
+  const target = chinese ? 'en' : 'zh-CN';
+  try {
+    // Any Han character means Chinese: auto-detect calls 'send me the 合同' English.
+    const data = await request(
+      { sl: chinese ? 'zh-CN' : 'auto', tl: target, q: trimmed },
+      ['t'],
+    );
+    const translatedText = (data.sentences ?? [])
+      .map((item: any) => item.trans ?? '')
+      .join('')
+      .trim();
+    if (!translatedText) throw new Error('谷歌翻译没有返回结果');
+    const result = {
+      status: 'ok',
+      translatedText,
+      sourceLanguage: languageLabel(String(data.src ?? (chinese ? 'zh-CN' : 'en'))),
+      targetLanguage: languageLabel(target),
+    };
+    remember(textCache, trimmed, result);
+    return result;
+  } catch (error) {
+    return {
+      status: 'translationError',
+      message: `谷歌翻译不可用：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+export const translateWithGoogle = async (
+  items: TranslationItem[],
+): Promise<TranslationResponse> => {
+  const results: TranslationResult[] = Array.from({ length: items.length });
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      const item = items[index];
+      results[index] = {
+        id: item.id,
+        originalText: item.text,
+        ...(await translateText(item.text)),
+      };
+    }
+  };
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  return { ok: true, engine: 'Google Translate', results };
 };

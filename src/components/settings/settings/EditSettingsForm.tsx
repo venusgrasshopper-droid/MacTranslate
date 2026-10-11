@@ -19,7 +19,7 @@ import {
   GITHUB_FRANZ_URL,
   SPLIT_COLUMNS_MAX,
   SPLIT_COLUMNS_MIN,
-  TRANSLATOR_ENGINE_MACOS,
+  TRANSLATOR_ENGINE_AUTO,
 } from '../../../config';
 import {
   isMac,
@@ -1084,7 +1084,7 @@ class EditSettingsForm extends Component<IProps, IState> {
                 )}
                 {form.$('enableTranslator').value &&
                   form.$('translatorEngine').value !==
-                    TRANSLATOR_ENGINE_MACOS && (
+                    TRANSLATOR_ENGINE_AUTO && (
                     <Select field={form.$('translatorLanguage')} />
                   )}
 

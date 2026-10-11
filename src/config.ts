@@ -283,12 +283,13 @@ export const SEARCH_ENGINE_NAMES = {
 
 export const TRANSLATOR_ENGINE_GOOGLE = 'Google';
 export const TRANSLATOR_ENGINE_LIBRETRANSLATE = 'LibreTranslate';
-export const TRANSLATOR_ENGINE_MACOS = 'macOS';
+// Value kept as 'macOS' so engines saved by earlier builds keep working.
+export const TRANSLATOR_ENGINE_AUTO = 'macOS';
 export const TRANSLATOR_ENGINE_NAMES = {
   [TRANSLATOR_ENGINE_LIBRETRANSLATE]:
     'Ferdium Translator (Powered by LibreTranslate)',
   [TRANSLATOR_ENGINE_GOOGLE]: 'Google',
-  [TRANSLATOR_ENGINE_MACOS]: 'macOS System Translation (Auto Chinese ↔ English)',
+  [TRANSLATOR_ENGINE_AUTO]: 'Google Translate (Auto Chinese ↔ English)',
 };
 
 export const LIBRETRANSLATE_TRANSLATOR_LANGUAGES = {
