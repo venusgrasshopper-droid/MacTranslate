@@ -2,7 +2,7 @@
 
 import { EventEmitter } from 'node:events';
 import { copyFileSync, existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   BrowserWindow,
   app,
@@ -28,6 +28,7 @@ import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_SHORTCUTS,
   DEFAULT_WINDOW_OPTIONS,
+  TRANSLATOR_ENGINE_MACOS,
 } from './config';
 
 import { altKey, isLinux, isMac, isWindows } from './environment';
@@ -59,6 +60,7 @@ import { appId } from './package.json';
 import { asarPath } from './helpers/asar-helpers';
 import { checkIfCertIsPresent } from './helpers/certs-helpers';
 import { translateTo } from './helpers/translation-helpers';
+import { translateWithMacOS } from './helpers/macos-translation-native';
 import { openExternalUrl } from './helpers/url-helpers';
 import userAgent from './helpers/userAgent-helpers';
 import generatedTranslations from './i18n/translations';
@@ -111,6 +113,13 @@ if (isWindows) {
 
 // Initialize Settings
 const settings = new Settings('app', DEFAULT_APP_SETTINGS);
+if (isMac && settings.get('macOSTranslationTrialConfigured') !== true) {
+  settings.set({
+    enableTranslator: true,
+    translatorEngine: TRANSLATOR_ENGINE_MACOS,
+    macOSTranslationTrialConfigured: true,
+  });
+}
 const proxySettings = new Settings('proxy');
 const shortcutSettings = new Settings('shortcuts', DEFAULT_SHORTCUTS);
 
@@ -725,16 +734,32 @@ const recognitionMessageFile = () =>
 
 let messageViewerWindow: BrowserWindow | undefined;
 
-const readRecognizedMessagesForViewer = (): Array<Record<string, unknown>> => {
-  const file = recognitionMessageFile();
-  ensureFileSync(file);
+const readMessageArchiveFile = (
+  file: string,
+): Array<Record<string, unknown>> => {
+  if (!existsSync(file)) return [];
   const raw = readFileSync(file, 'utf8');
   const rows: Array<Record<string, unknown>> = [];
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          row => row && typeof row === 'object' && !Array.isArray(row),
+        );
+      }
+    } catch {
+      // Fall back to JSON Lines parsing.
+    }
+  }
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line);
-      if (parsed && typeof parsed === 'object') rows.push(parsed);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        rows.push(parsed);
+      }
     } catch {
       // Keep a malformed line from breaking the whole viewer.
     }
@@ -742,9 +767,23 @@ const readRecognizedMessagesForViewer = (): Array<Record<string, unknown>> => {
   return rows;
 };
 
-const buildMessageViewerHtml = (): string => {
-  const rows = readRecognizedMessagesForViewer();
+const readRecognizedMessagesForViewer = (): Array<Record<string, unknown>> => {
+  const file = recognitionMessageFile();
+  ensureFileSync(file);
+  return readMessageArchiveFile(file);
+};
+
+const buildMessageViewerHtml = (file = recognitionMessageFile()): string => {
+  const rows =
+    file === recognitionMessageFile()
+      ? readRecognizedMessagesForViewer()
+      : readMessageArchiveFile(file);
+  const archiveName = basename(file);
   const serializedRows = JSON.stringify(rows)
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e')
+    .replaceAll('&', '\\u0026');
+  const serializedArchiveName = JSON.stringify(archiveName)
     .replaceAll('<', '\\u003c')
     .replaceAll('>', '\\u003e')
     .replaceAll('&', '\\u0026');
@@ -761,12 +800,12 @@ const buildMessageViewerHtml = (): string => {
 *{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:CanvasText;overflow:hidden}
 .app{height:100%;min-height:0;overflow:hidden;display:grid;grid-template-rows:auto minmax(0,1fr)}.topbar{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
 .titleblock{min-width:210px}.title{font-size:18px;font-weight:700}.summary{font-size:11px;color:var(--muted);margin-top:2px;white-space:nowrap}.controls{display:flex;gap:8px;flex:1;justify-content:flex-end}
-input,select{height:34px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:inherit;padding:0 10px;font:inherit;font-size:13px;outline:none}input{width:min(360px,38vw)}input:focus,select:focus{border-color:var(--accent)}
+input,select,button{height:34px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:inherit;padding:0 10px;font:inherit;font-size:13px;outline:none}input{width:min(340px,34vw)}button{cursor:pointer;white-space:nowrap}button:hover{background:var(--hover)}input:focus,select:focus,button:focus{border-color:var(--accent)}.autoTranslate{display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap}.autoTranslate input{width:auto;height:auto}.translateStatus{font-size:10px;color:var(--muted);margin-left:auto}
 .main{min-height:0;overflow:hidden;display:grid;grid-template-columns:300px minmax(0,1fr)}.sidebar{min-width:0;min-height:0;border-right:1px solid var(--line);background:var(--panel);overflow-y:auto;overflow-x:hidden}.conversation{padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer}.conversation:hover{background:var(--hover)}.conversation.active{background:color-mix(in srgb,var(--accent) 12%,var(--panel))}
 .convTop{display:flex;align-items:center;gap:8px}.service{font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:.4px;color:var(--accent);flex:0 0 auto}.convTitle{font-size:13px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.count{font-size:11px;color:var(--muted)}.preview{font-size:12px;color:var(--muted);margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.convTime{font-size:10px;color:var(--muted);margin-top:4px}
 .content{min-width:0;min-height:0;overflow:hidden;display:grid;grid-template-rows:auto minmax(0,1fr);background:var(--bg)}.contentHead{padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;align-items:center;gap:10px}.contentTitle{font-size:14px;font-weight:700}.contentMeta{font-size:11px;color:var(--muted)}
 .messages{min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding:18px 22px 30px}.day{display:flex;justify-content:center;margin:12px 0}.day span{font-size:10px;color:var(--muted);background:var(--panel);border:1px solid var(--line);padding:3px 8px;border-radius:999px}
-.row{display:flex;margin:7px 0}.row.outgoing{justify-content:flex-end}.msgWrap{max-width:min(720px,78%)}.sender{font-size:10px;color:var(--muted);margin:0 8px 3px}.row.outgoing .sender{text-align:right}.bubble{font-size:13px;line-height:1.42;white-space:pre-wrap;word-break:break-word;border-radius:15px;padding:8px 11px;background:var(--incoming)}.row.outgoing .bubble{background:var(--outgoing);color:var(--outgoingText)}.time{font-size:9px;color:var(--muted);margin:3px 8px 0}.row.outgoing .time{text-align:right}
+.row{display:flex;margin:7px 0}.row.outgoing{justify-content:flex-end}.msgWrap{max-width:min(720px,78%)}.sender{font-size:10px;color:var(--muted);margin:0 8px 3px}.row.outgoing .sender{text-align:right}.bubble{font-size:13px;line-height:1.42;white-space:pre-wrap;word-break:break-word;border-radius:15px;padding:8px 11px;background:var(--incoming)}.row.outgoing .bubble{background:var(--outgoing);color:var(--outgoingText)}.translation{font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;margin:4px 8px 0;padding:7px 9px;border-left:2px solid var(--accent);color:var(--muted)}.translation.ok{color:inherit}.translation.error{color:#ff9f0a}.translationLabel{font-size:9px;color:var(--muted);margin-bottom:2px}.time{font-size:9px;color:var(--muted);margin:3px 8px 0}.row.outgoing .time{text-align:right}
 .empty{height:100%;display:grid;place-items:center;color:var(--muted);font-size:13px;padding:30px;text-align:center}.mark{background:#ffd60a;color:#000;border-radius:2px;padding:0 1px}
 @media(max-width:760px){.main{grid-template-columns:220px 1fr}.titleblock{display:none}.controls{justify-content:stretch}input{width:100%;min-width:0}.msgWrap{max-width:90%}}
 </style>
@@ -776,6 +815,9 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
   <div class="topbar">
     <div class="titleblock"><div class="title">消息记录</div><div class="summary" id="summary"></div></div>
     <div class="controls">
+      <button id="openArchive" type="button">打开消息记录…</button>
+      <label class="autoTranslate"><input id="autoTranslate" type="checkbox" checked>自动翻译</label>
+      <button id="translateConversation" type="button">翻译当前会话</button>
       <input id="search" type="search" placeholder="搜索发送者、会话或消息…" autocomplete="off">
       <select id="service"><option value="all">全部平台</option></select>
       <select id="direction"><option value="all">全部方向</option><option value="incoming">收到</option><option value="outgoing">发出</option></select>
@@ -784,7 +826,7 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
   <div class="main">
     <aside class="sidebar" id="sidebar"></aside>
     <section class="content">
-      <div class="contentHead"><div class="contentTitle" id="contentTitle">选择会话</div><div class="contentMeta" id="contentMeta"></div></div>
+      <div class="contentHead"><div class="contentTitle" id="contentTitle">选择会话</div><div class="contentMeta" id="contentMeta"></div><div class="translateStatus" id="translateStatus"></div></div>
       <div class="messages" id="messages"><div class="empty">暂无真实消息</div></div>
     </section>
   </div>
@@ -793,6 +835,8 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
 <script>
 (function(){
   const raw = JSON.parse(document.getElementById('message-data').textContent || '[]');
+  const archiveName = ${serializedArchiveName};
+  const viewerBridge = window.macTranslateViewer;
   const text = v => String(v == null ? '' : v);
   const normalized = raw.map((r,i) => ({
     _i:i,
@@ -807,7 +851,7 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
     observedAt:Number(r.observedAt || 0) || 0,
     timestampQuality:text(r.timestampQuality || ''),
     providerEvent:text(r.providerEvent || ''),
-    body:text(r.text || '')
+    body:text(r.text || r.body || r.messageText || r.content || '')
   })).filter(m => !(m.service === 'signal' && m.providerEvent === 'signal-8.17.0-rendered-dom-readonly'));
 
   const normalizedTitle = v => text(v).normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF\uFE0F]/g,'').replace(/\s+/g,' ').trim().replace(/[.·•]+$/g,'').trim().toLocaleLowerCase();
@@ -856,7 +900,7 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
   displayRows.sort((a,b) => a.ts - b.ts || a._i - b._i);
 
   const summary = document.getElementById('summary');
-  summary.textContent = '原始 ' + raw.length + ' 条 · 去重显示 ' + displayRows.length + ' 条 · 再次点击 MacTranslate → 查看消息 可刷新';
+  summary.textContent = archiveName + ' · 原始 ' + raw.length + ' 条 · 去重显示 ' + displayRows.length + ' 条';
 
   const serviceSelect = document.getElementById('service');
   [...new Set(displayRows.map(x => x.service))].sort().forEach(s => {
@@ -868,7 +912,14 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
   const messages=document.getElementById('messages');
   const contentTitle=document.getElementById('contentTitle');
   const contentMeta=document.getElementById('contentMeta');
+  const translateStatus=document.getElementById('translateStatus');
+  const autoTranslate=document.getElementById('autoTranslate');
+  const translateConversation=document.getElementById('translateConversation');
+  const openArchive=document.getElementById('openArchive');
+  const translationCache=new Map();
   let selectedKey='';
+  const pendingTranslations=new Set();
+  const translationRetryAt=new Map();
 
   const convKey = m => m.service + '\\u001f' + archiveConversationKey(m);
   const fmtSidebarTime = ts => ts ? new Date(ts).toLocaleString([], {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
@@ -908,9 +959,81 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
     }
     renderMessages();
   }
-  function renderMessages(){
+  async function translateList(list, force){
+    if(!viewerBridge || typeof viewerBridge.translateBatch!=='function'){
+      translateStatus.textContent='系统翻译桥接不可用';
+      return;
+    }
+    const unique=[];
+    const seenBodies=new Set();
+    const now=Date.now();
+    for(let index=list.length-1;index>=0;index--){
+      const m=list[index];
+      const body=(m.body||'').trim();
+      if(!body || /^[[^]]+]$/.test(body) || seenBodies.has(body)) continue;
+      seenBodies.add(body);
+      if(force && !pendingTranslations.has(body)){
+        translationCache.delete(body);
+        translationRetryAt.delete(body);
+      }
+      if(pendingTranslations.has(body)) continue;
+      const existing=translationCache.get(body);
+      if(existing?.status==='ok' || existing?.status==='languagePackRequired' || existing?.status==='unsupportedLanguage' || existing?.status==='unsupportedPair') continue;
+      if(existing && (translationRetryAt.get(body)||0)>now) continue;
+      if(existing) translationCache.delete(body);
+      pendingTranslations.add(body);
+      translationCache.set(body,{status:'pending'});
+      unique.push({id:String(unique.length),text:body});
+    }
+    if(!unique.length) return;
+    translateStatus.textContent='macOS 系统翻译中…';
+    for(let offset=0;offset<unique.length;offset+=12){
+      const chunk=unique.slice(offset,offset+12);
+      let response;
+      try{ response=await viewerBridge.translateBatch(chunk); }
+      catch(error){ response={ok:false,results:[],message:String(error?.message||error)}; }
+      if(!response?.ok){
+        for(const item of chunk){
+          pendingTranslations.delete(item.text);
+          translationRetryAt.set(item.text,Date.now()+2500);
+          translationCache.set(item.text,{status:'translationError',message:response?.message||'系统翻译失败'});
+        }
+      }else{
+        const byId=new Map((response.results||[]).map(r=>[String(r.id),r]));
+        for(const item of chunk){
+          pendingTranslations.delete(item.text);
+          const result=byId.get(String(item.id));
+          if(result){
+            translationCache.set(item.text,result);
+            if(result.status==='ok' || result.status==='languagePackRequired' || result.status==='unsupportedLanguage' || result.status==='unsupportedPair') translationRetryAt.delete(item.text);
+            else translationRetryAt.set(item.text,Date.now()+2500);
+          }else{
+            translationRetryAt.set(item.text,Date.now()+2500);
+            translationCache.set(item.text,{status:'translationError',message:'系统翻译未返回结果'});
+          }
+        }
+      }
+      renderMessages(true);
+      await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    const current=displayRows.filter(m=>convKey(m)===selectedKey && matches(m));
+    let completed=0, failed=0, pending=0;
+    const counted=new Set();
+    for(const m of current){
+      const body=(m.body||'').trim();
+      if(!body||counted.has(body))continue;
+      counted.add(body);
+      const state=translationCache.get(body);
+      if(state?.status==='ok')completed++;
+      else if(state?.status==='pending')pending++;
+      else if(state)failed++;
+    }
+    translateStatus.textContent='macOS 系统翻译 · 成功 '+completed+(pending?' · 翻译中 '+pending:'')+(failed?' · 未翻译 '+failed:'');
+  }
+  function renderMessages(preserveScroll=false){
+    const previousScrollTop=messages.scrollTop;
     clear(messages);
-    if(!selectedKey){ contentTitle.textContent='选择会话'; contentMeta.textContent=''; const e=document.createElement('div'); e.className='empty'; e.textContent='暂无消息'; messages.appendChild(e); return; }
+    if(!selectedKey){ contentTitle.textContent='选择会话'; contentMeta.textContent=''; translateStatus.textContent=''; const e=document.createElement('div'); e.className='empty'; e.textContent='暂无消息'; messages.appendChild(e); return; }
     const list=displayRows.filter(m=>convKey(m)===selectedKey && matches(m));
     if(!list.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='这个会话没有符合条件的消息'; messages.appendChild(e); return; }
     contentTitle.textContent=list[0].conversation;
@@ -922,12 +1045,33 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
       const wrap=document.createElement('div'); wrap.className='msgWrap';
       const sender=document.createElement('div'); sender.className='sender'; sender.textContent=m.direction==='outgoing'?'我':m.sender;
       const bubble=document.createElement('div'); bubble.className='bubble'; bubble.textContent=m.body || '[空消息]';
+      wrap.append(sender,bubble);
+      const translated=translationCache.get((m.body||'').trim());
+      if(translated && translated.status!=='pending'){
+        const box=document.createElement('div'); box.className='translation '+(translated.status==='ok'?'ok':'error');
+        const label=document.createElement('div'); label.className='translationLabel';
+        if(translated.status==='ok'){
+          label.textContent=(translated.sourceLanguage||'自动识别')+' → '+(translated.targetLanguage||'目标语言')+' · macOS';
+          const value=document.createElement('div'); value.textContent=translated.translatedText||''; box.append(label,value);
+        }else{
+          label.textContent='macOS 系统翻译';
+          const value=document.createElement('div'); value.textContent=translated.message||'暂时无法翻译'; box.append(label,value);
+        }
+        wrap.appendChild(box);
+      }
       const tm=document.createElement('div'); tm.className='time'; tm.textContent=fmtTime(m.ts);
-      wrap.append(sender,bubble,tm); row.appendChild(wrap); messages.appendChild(row);
+      wrap.appendChild(tm); row.appendChild(wrap); messages.appendChild(row);
     }
-    messages.scrollTop=messages.scrollHeight;
+    messages.scrollTop=preserveScroll?previousScrollTop:messages.scrollHeight;
+    if(autoTranslate.checked) queueMicrotask(()=>{void translateList(list,false);});
   }
   search.addEventListener('input',renderSidebar); serviceSelect.addEventListener('change',renderSidebar); direction.addEventListener('change',renderSidebar);
+  autoTranslate.addEventListener('change',()=>{ if(autoTranslate.checked) renderMessages(); });
+  translateConversation.addEventListener('click',()=>{
+    const list=displayRows.filter(m=>convKey(m)===selectedKey && matches(m));
+    void translateList(list,true);
+  });
+  openArchive.addEventListener('click',()=>{ if(viewerBridge?.openArchive) void viewerBridge.openArchive(); });
   renderSidebar();
 })();
 </script>
@@ -935,26 +1079,29 @@ input,select{height:34px;border:1px solid var(--line);border-radius:8px;backgrou
 </html>`;
 };
 
-const showMessageViewer = async (): Promise<void> => {
+const showMessageViewer = async (
+  file = recognitionMessageFile(),
+): Promise<void> => {
   if (!messageViewerWindow || messageViewerWindow.isDestroyed()) {
     messageViewerWindow = new BrowserWindow({
-      width: 1100,
-      height: 720,
-      minWidth: 760,
-      minHeight: 480,
+      width: 1180,
+      height: 760,
+      minWidth: 860,
+      minHeight: 520,
       title: 'MacTranslate 消息记录',
       parent: mainWindow,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        preload: join(__dirname, 'electron', 'message-viewer-preload.js'),
       },
     });
     messageViewerWindow.on('closed', () => {
       messageViewerWindow = undefined;
     });
   }
-  const html = buildMessageViewerHtml();
+  const html = buildMessageViewerHtml(file);
   await messageViewerWindow.loadURL(
     `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
   );
@@ -963,9 +1110,59 @@ const showMessageViewer = async (): Promise<void> => {
 };
 
 ipcMain.handle('message-recognition:view-messages', async () => {
-  await showMessageViewer();
+  await showMessageViewer(recognitionMessageFile());
   return { ok: true, file: recognitionMessageFile() };
 });
+
+ipcMain.handle('message-recognition:open-message-file', async () => {
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, {
+        title: '打开消息记录',
+        properties: ['openFile'],
+        filters: [
+          { name: 'MacTranslate 消息记录', extensions: ['jsonl', 'json'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      })
+    : await dialog.showOpenDialog({
+        title: '打开消息记录',
+        properties: ['openFile'],
+        filters: [
+          { name: 'MacTranslate 消息记录', extensions: ['jsonl', 'json'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      });
+  const file = result.filePaths[0];
+  if (result.canceled || !file) return { ok: false, canceled: true };
+
+  const rows = readMessageArchiveFile(file);
+  if (!rows.length) {
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: 'MacTranslate',
+      message: '这个文件没有可读取的消息记录',
+    });
+    return { ok: false, canceled: false, file };
+  }
+
+  await showMessageViewer(file);
+  return { ok: true, file, rows: rows.length };
+});
+
+ipcMain.handle(
+  'message-recognition:translate-batch',
+  async (_e, payload: { items?: Array<{ id?: unknown; text?: unknown }> }) => {
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const normalized = items
+      .slice(0, 200)
+      .map((item, index) => ({
+        id: String(item?.id ?? index),
+        text: String(item?.text ?? '').slice(0, 20_000),
+      }))
+      .filter(item => item.text.trim().length > 0);
+    return translateWithMacOS(normalized);
+  },
+);
 
 ipcMain.handle('message-recognition:export-messages', async () => {
   const source = recognitionMessageFile();

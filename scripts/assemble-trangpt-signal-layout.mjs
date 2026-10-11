@@ -209,7 +209,23 @@ try {
     force: true,
   });
 
+  // The macOS translation helper is spawned as a real executable, so it must
+  // exist on the real filesystem next to app.asar (see macos-translation-native).
+  const helperRelative = path.join(
+    'assets',
+    'images',
+    'icons',
+    'mactranslate-translation-helper',
+  );
+  const stagedHelper = path.join(stagingApp, helperRelative);
+  const unpackedHelper = path.join(appAsarUnpackedPath, helperRelative);
+  requireFile(stagedHelper);
+  fs.mkdirSync(path.dirname(unpackedHelper), { recursive: true });
+  fs.copyFileSync(stagedHelper, unpackedHelper);
+  fs.chmodSync(unpackedHelper, 0o755);
+
   requireFile(appAsarPath);
+  requireFile(unpackedHelper);
   requireFile(path.join(unpackedRecipes, 'all.json'));
   requireFile(path.join(unpackedRecipes, 'signal.tar.gz'));
   requireFile(

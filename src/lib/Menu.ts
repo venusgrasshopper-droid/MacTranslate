@@ -272,6 +272,10 @@ export const menuItems = defineMessages({
     id: 'menu.app.exportMessages',
     defaultMessage: 'Export Messages...',
   },
+  openMessageArchive: {
+    id: 'menu.app.openMessageArchive',
+    defaultMessage: 'Open Message Archive...',
+  },
   checkForUpdates: {
     id: 'menu.app.checkForUpdates',
     defaultMessage: 'Check for updates',
@@ -940,6 +944,13 @@ class FranzMenu implements StoresProps {
           visible: !locked,
           click: () => {
             void ipcRenderer.invoke('message-recognition:export-messages');
+          },
+        },
+        {
+          label: intl.formatMessage(menuItems.openMessageArchive),
+          visible: !locked,
+          click: () => {
+            void ipcRenderer.invoke('message-recognition:open-message-file');
           },
         },
         {

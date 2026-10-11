@@ -283,10 +283,12 @@ export const SEARCH_ENGINE_NAMES = {
 
 export const TRANSLATOR_ENGINE_GOOGLE = 'Google';
 export const TRANSLATOR_ENGINE_LIBRETRANSLATE = 'LibreTranslate';
+export const TRANSLATOR_ENGINE_MACOS = 'macOS';
 export const TRANSLATOR_ENGINE_NAMES = {
   [TRANSLATOR_ENGINE_LIBRETRANSLATE]:
     'Ferdium Translator (Powered by LibreTranslate)',
   [TRANSLATOR_ENGINE_GOOGLE]: 'Google',
+  [TRANSLATOR_ENGINE_MACOS]: 'macOS System Translation (Auto Chinese ↔ English)',
 };
 
 export const LIBRETRANSLATE_TRANSLATOR_LANGUAGES = {
@@ -556,6 +558,7 @@ export const DEFAULT_APP_SETTINGS = {
   showDragArea: false,
   enableSpellchecking: true,
   enableTranslator: false,
+  macOSTranslationTrialConfigured: false,
   spellcheckerLanguage: 'en-us',
   darkMode: false,
   navigationBarManualActive: false,

@@ -94,6 +94,7 @@ export interface AppStore extends TypedStore {
   darkMode: boolean;
   enableSpellchecking: boolean;
   enableTranslator: boolean;
+  macOSTranslationTrialConfigured: boolean;
   useSelfSignedCertificates: boolean;
   fetchDataInterval: 4;
   get(key: string): any;

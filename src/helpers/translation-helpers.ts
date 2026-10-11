@@ -1,5 +1,9 @@
 import translateGoogle from 'google-translate-api-x';
-import { LIVE_API_FERDIUM_LIBRETRANSLATE } from '../config';
+import {
+  LIVE_API_FERDIUM_LIBRETRANSLATE,
+  TRANSLATOR_ENGINE_MACOS,
+} from '../config';
+import { translateWithMacOS } from './macos-translation-native';
 
 export async function translateTo(
   text: string,
@@ -9,6 +13,18 @@ export async function translateTo(
   const errorText =
     // TODO: Need to support i18n
     'FERDIUM ERROR: An error occurred. Please select less text to translate or try again later.';
+
+  if (translatorEngine === TRANSLATOR_ENGINE_MACOS) {
+    const response = await translateWithMacOS([{ id: 'selection', text }]);
+    const result = response.results[0];
+    if (response.ok && result?.status === 'ok' && result.translatedText) {
+      return { text: result.translatedText, error: false };
+    }
+    return {
+      text: result?.message || response.message || errorText,
+      error: true,
+    };
+  }
 
   if (translatorEngine === 'Google') {
     const translationResult = await translateGoogle(text, {

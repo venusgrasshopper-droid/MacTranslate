@@ -84,6 +84,12 @@ const copyManualAssets = () => {
   }
   fs.copyFileSync('package.json', `${outDir}/package.json`);
   fs.copyFileSync('electron-builder.npmrc', `${outDir}/.npmrc`);
+  // electron-builder runs `npm install --production` inside build/. Without a
+  // lockfile it resolves whatever is newest, so pin the shipped (R30) versions.
+  fs.copyFileSync(
+    'build-helpers/app-package-lock.json',
+    `${outDir}/package-lock.json`,
+  );
 
   const buildInfoData = {
     timestamp: buildInfo.timestamp,

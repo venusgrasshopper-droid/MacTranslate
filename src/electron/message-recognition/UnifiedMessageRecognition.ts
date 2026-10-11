@@ -11,6 +11,10 @@ import {
   type WebContents,
 } from 'electron';
 import { getSignalAccountIdForWebContents } from '../signal/EmbeddedSignalEngine';
+import {
+  armLiveMessageTranslation,
+  stopLiveMessageTranslation,
+} from './LiveMessageTranslation';
 
 const debug = require('../../preload-safe-debug')(
   'MacTranslate:RealMessageRecognitionV6',
@@ -2717,6 +2721,7 @@ function detach(contents: WebContents): void {
   const target = targets.get(contents.id);
   if (target?.retryTimer) clearTimeout(target.retryTimer);
   if (target?.signalCacheTimer) clearInterval(target.signalCacheTimer);
+  stopLiveMessageTranslation(contents.id);
   targets.delete(contents.id);
 }
 
@@ -2803,6 +2808,7 @@ function attach(contents: WebContents): void {
       target.url = url;
     }
     flushPendingConsoleEnvelopes(target);
+    armLiveMessageTranslation(target.service, target.contents);
     if (target.service === 'signal') armSignalCachePolling(target);
     if (shouldInject) void inject(target, reason);
   };
