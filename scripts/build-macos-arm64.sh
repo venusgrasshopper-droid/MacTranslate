@@ -73,7 +73,8 @@ printf '\n[2/10] Installing application dependencies...\n'
 pnpm install --no-frozen-lockfile
 ensure_arm64_7za
 
-printf '\n[3/10] Building service recipes...\n'
+printf '\n[3/10] Building service recipes and the macOS translation helper...\n'
+bash scripts/build-translation-helper.sh
 (
   cd recipes
   pnpm install --frozen-lockfile

@@ -60,7 +60,7 @@ import { appId } from './package.json';
 import { asarPath } from './helpers/asar-helpers';
 import { checkIfCertIsPresent } from './helpers/certs-helpers';
 import { translateTo } from './helpers/translation-helpers';
-import { translateWithGoogle } from './helpers/google-translate';
+import { translateItems } from './helpers/translate';
 import { openExternalUrl } from './helpers/url-helpers';
 import userAgent from './helpers/userAgent-helpers';
 import generatedTranslations from './i18n/translations';
@@ -1160,7 +1160,7 @@ ipcMain.handle(
         text: String(item?.text ?? '').slice(0, 20_000),
       }))
       .filter(item => item.text.trim().length > 0);
-    return translateWithGoogle(normalized);
+    return translateItems(normalized);
   },
 );
 

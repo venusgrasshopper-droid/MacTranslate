@@ -407,3 +407,6 @@ messages.jsonl
 .env.*
 .DS_Store
 .tmp/
+
+# Built by scripts/build-translation-helper.sh
+/src/assets/images/icons/mactranslate-translation-helper

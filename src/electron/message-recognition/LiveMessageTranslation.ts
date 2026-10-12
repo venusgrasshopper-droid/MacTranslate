@@ -1,11 +1,15 @@
 import type { Input, WebContents } from 'electron';
 import {
   type GoogleSentence,
-  googleTranslateWithAlternatives,
   type TranslationResult,
   translateWithGoogle,
   warmGoogleConnection,
 } from '../../helpers/google-translate';
+import {
+  googleAvailable,
+  translateItems,
+  translateWithAlternatives,
+} from '../../helpers/translate';
 
 // Live translation for chat webviews: incoming messages get a translation box
 // under the bubble, and the composer text is translated before it is sent.
@@ -544,22 +548,17 @@ const composerBridgeScript = (service: string) =>
 `;
 
 // Chinese in the composer comes with Google's sentence alternatives, like
-// translate.google.com; English only gets a reference translation.
+// translate.google.com; English only gets a reference translation. Without
+// Google (rate limited / unreachable) Apple's translation is used, no choices.
 const translateComposer = async (
   text: string,
   direction: string,
 ): Promise<ComposerTranslation> => {
-  if (direction !== 'zh-en') {
-    const response = await translateWithGoogle([{ id: 'composer', text }]);
-    return { ...response.results[0], engine: 'Google' };
-  }
-  const google = await googleTranslateWithAlternatives(text);
-  if (!google.ok) {
-    return {
-      id: 'composer',
-      status: 'translationError',
-      message: `谷歌翻译不可用：${google.message ?? ''}`,
-    };
+  const google =
+    direction === 'zh-en' ? await translateWithAlternatives(text) : null;
+  if (!google) {
+    const response = await translateItems([{ id: 'composer', text }]);
+    return response.results[0];
   }
   return {
     id: 'composer',
@@ -820,7 +819,7 @@ const processComposer = async (service: string, contents: WebContents) => {
       composerApplyScript(service, text, result),
       true,
     );
-    if (result.sentences?.length) {
+    if (result.sentences?.length && googleAvailable()) {
       void fillChoiceMeanings(contents, text, result.sentences).catch(() => {});
     }
     if (!applied?.send || contents.isDestroyed()) return;
@@ -908,7 +907,7 @@ const processTarget = async (service: string, contents: WebContents) => {
 
     const texts = [...waiting.keys()].slice(0, BATCH_LIMIT);
     if (!texts.length) return;
-    const response = await translateWithGoogle(
+    const response = await translateItems(
       texts.map((text, index) => ({ id: String(index), text })),
     );
     const byId = new Map(
