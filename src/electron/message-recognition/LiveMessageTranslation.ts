@@ -884,49 +884,25 @@ const processComposer = async (service: string, contents: WebContents) => {
   }
 };
 
-// --- WhatsApp voice messages: on-device speech-to-text, then translation ---
+// --- Voice messages (WhatsApp, Signal): on-device speech-to-text, then translation ---
 
-const VOICE_MAX_SECONDS = 300;
+const VOICE_SERVICES = new Set(['whatsapp', 'signal']);
+// Signal's renderer state (reduxStore, attachment URLs) lives in its preload
+// world, which Electron runs as isolated world 999.
+const SIGNAL_PRELOAD_WORLD = 999;
 
-// Visible incoming WhatsApp voice notes that have no transcript yet.
-const voiceScanScript = () => String.raw`
-(() => {
-  if(document.visibilityState==='hidden')return [];
-  let Msg=null;
-  try{Msg=window.require?.('WAWebCollections')?.Msg;}catch{}
-  if(!Msg)return [];
-  const ids=[];
-  for(const row of [...document.querySelectorAll('[data-id]')].slice(-60)){
-    const rect=row.getBoundingClientRect();
-    if(!(rect.width>0&&rect.height>0&&rect.bottom>=0&&rect.top<=innerHeight))continue;
-    if(row.querySelector('.mactranslate-voice'))continue;
-    const id=row.getAttribute('data-id');
-    let msg=null;
-    try{msg=Msg.get(id);}catch{}
-    if(!msg||(msg.type!=='ptt'&&msg.type!=='audio')||msg.id?.fromMe)continue;
-    if(!ids.includes(id))ids.push(id);
-  }
-  return ids;
-})()
-`;
+const runVoiceScript = (service: string, contents: WebContents, code: string) =>
+  service === 'signal'
+    ? contents.executeJavaScriptInIsolatedWorld(SIGNAL_PRELOAD_WORLD, [{ code }], true)
+    : contents.executeJavaScript(code, true);
 
-// Download the voice note the way whatsapp-web.js resolveMediaBlob does, decode
-// it with the page's own audio decoder and return 16 kHz mono WAV as base64.
-const voiceAudioScript = (id: string) => String.raw`
-(async () => {
-  try{
-    const id=${JSON.stringify(id)};
-    const {Msg}=window.require('WAWebCollections');
-    const msg=Msg.get(id)||(await Msg.getMessagesById([id]))?.messages?.[0];
-    if(!msg||!msg.mediaData||msg.mediaData.mediaStage==='REUPLOADING')return {ok:false,message:'语音还不能下载'};
-    if(Number(msg.duration)>${VOICE_MAX_SECONDS})return {ok:false,message:'语音超过 5 分钟，未转文字'};
-    await msg.downloadMedia({downloadEvenIfExpensive:true,rmrReason:1,isUserInitiated:true});
-    const stage=String(msg.mediaData.mediaStage||'');
-    if(stage.includes('ERROR')||stage==='FETCHING')return {ok:false,message:'语音下载失败'};
-    const cached=window.require('WAWebMediaInMemoryBlobCache').InMemoryMediaBlobCache.get(msg.mediaObject?.filehash);
-    const blob=cached||msg.mediaObject?.mediaBlob?.forceToBlob?.();
-    if(!blob)return {ok:false,message:'读取语音失败'};
-    const audio=await new OfflineAudioContext(1,1,16000).decodeAudioData(await blob.arrayBuffer());
+const VOICE_PAGE_HELPERS = String.raw`
+  const visibleRow=row=>{const r=row.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>=0&&r.top<=innerHeight;};
+  const signalVoice=attachment=>attachment&&attachment.path&&String(attachment.contentType||'').startsWith('audio/')&&((attachment.flags&1)===1||!attachment.fileName);
+  // Decode with the page's own decoder and return 16 kHz mono WAV as base64.
+  const toWavBase64=async buffer=>{
+    const audio=await new OfflineAudioContext(1,1,16000).decodeAudioData(buffer);
+    if(audio.duration>300)throw new Error('语音超过 5 分钟，未转文字');
     const length=audio.length;
     const pcm=new Int16Array(length);
     for(let i=0;i<length;i++){
@@ -945,12 +921,77 @@ const voiceAudioScript = (id: string) => String.raw`
     bytes.set(new Uint8Array(pcm.buffer),44);
     let binary='';
     for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));
-    return {ok:true,wav:btoa(binary)};
-  }catch(error){return {ok:false,message:'读取语音失败：'+(error?.message||error)};}
+    return btoa(binary);
+  };
+`;
+
+// Visible incoming voice messages that have no transcript yet.
+const voiceScanScript = (service: string) => String.raw`
+(() => {
+  ${VOICE_PAGE_HELPERS}
+  if(document.visibilityState==='hidden')return [];
+  const ids=[];
+  if(${JSON.stringify(service)}==='signal'){
+    const lookup=globalThis.reduxStore?.getState?.()?.conversations?.messagesLookup||{};
+    for(const row of [...document.querySelectorAll('[data-message-id][role="listitem"]')].slice(-60)){
+      if(!visibleRow(row)||row.querySelector('.mactranslate-voice'))continue;
+      const id=row.getAttribute('data-message-id');
+      const msg=lookup[id];
+      if(msg?.type==='incoming'&&(msg.attachments||[]).some(signalVoice)&&!ids.includes(id))ids.push(id);
+    }
+    return ids;
+  }
+  let Msg=null;
+  try{Msg=window.require?.('WAWebCollections')?.Msg;}catch{}
+  if(!Msg)return [];
+  for(const row of [...document.querySelectorAll('[data-id]')].slice(-60)){
+    if(!visibleRow(row)||row.querySelector('.mactranslate-voice'))continue;
+    const id=row.getAttribute('data-id');
+    let msg=null;
+    try{msg=Msg.get(id);}catch{}
+    if(!msg||(msg.type!=='ptt'&&msg.type!=='audio')||msg.id?.fromMe)continue;
+    if(!ids.includes(id))ids.push(id);
+  }
+  return ids;
+})()
+`;
+
+// WhatsApp: download like whatsapp-web.js resolveMediaBlob. Signal: fetch the
+// attachment:// URL Signal itself builds (getLocalAttachmentUrl).
+const voiceAudioScript = (service: string, id: string) => String.raw`
+(async () => {
+  ${VOICE_PAGE_HELPERS}
+  try{
+    const id=${JSON.stringify(id)};
+    if(${JSON.stringify(service)}==='signal'){
+      const msg=globalThis.reduxStore?.getState?.()?.conversations?.messagesLookup?.[id];
+      const attachment=(msg?.attachments||[]).find(signalVoice);
+      if(!attachment)return {ok:false,message:'语音还没下载'};
+      const url=new URL('attachment://v'+(attachment.version===2?2:1)+'/'+String(attachment.path).split('\\').join('/'));
+      if(attachment.version===2&&attachment.localKey)url.searchParams.set('key',attachment.localKey);
+      if(globalThis.userId)url.searchParams.set('userId',globalThis.userId);
+      if(attachment.size!=null)url.searchParams.set('size',String(attachment.size));
+      if(attachment.contentType)url.searchParams.set('contentType',attachment.contentType);
+      const response=await fetch(url.toString());
+      if(!response.ok)return {ok:false,message:'读取语音失败'};
+      return {ok:true,wav:await toWavBase64(await response.arrayBuffer())};
+    }
+    const {Msg}=window.require('WAWebCollections');
+    const msg=Msg.get(id)||(await Msg.getMessagesById([id]))?.messages?.[0];
+    if(!msg||!msg.mediaData||msg.mediaData.mediaStage==='REUPLOADING')return {ok:false,message:'语音还不能下载'};
+    await msg.downloadMedia({downloadEvenIfExpensive:true,rmrReason:1,isUserInitiated:true});
+    const stage=String(msg.mediaData.mediaStage||'');
+    if(stage.includes('ERROR')||stage==='FETCHING')return {ok:false,message:'语音下载失败'};
+    const cached=window.require('WAWebMediaInMemoryBlobCache').InMemoryMediaBlobCache.get(msg.mediaObject?.filehash);
+    const blob=cached||msg.mediaObject?.mediaBlob?.forceToBlob?.();
+    if(!blob)return {ok:false,message:'读取语音失败'};
+    return {ok:true,wav:await toWavBase64(await blob.arrayBuffer())};
+  }catch(error){return {ok:false,message:String(error?.message||error).startsWith('语音')?String(error.message):'读取语音失败：'+(error?.message||error)};}
 })()
 `;
 
 const voiceApplyScript = (
+  service: string,
   id: string,
   label: string,
   transcript: string,
@@ -959,14 +1000,18 @@ const voiceApplyScript = (
 (() => {
   const id=${JSON.stringify(id)};
   const escape=value=>globalThis.CSS?.escape?CSS.escape(value):String(value).replace(/["]/g,'');
-  const row=document.querySelector('[data-id="'+escape(id)+'"]');
+  const signal=${JSON.stringify(service)}==='signal';
+  const row=document.querySelector(signal?'[data-message-id="'+escape(id)+'"][role="listitem"]':'[data-id="'+escape(id)+'"]');
   if(!row)return false;
   let box=row.querySelector('.mactranslate-voice');
   if(!box){
     box=document.createElement('div');
     box.className='mactranslate-voice';
     box.style.cssText='display:block;box-sizing:border-box;margin:4px 6px 2px;padding:4px 8px;border-left:2px solid #0a84ff;border-radius:3px;background:rgba(10,132,255,.08);color:inherit;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-width:520px;user-select:text;';
-    (row.querySelector('.message-in,.message-out')||row).appendChild(box);
+    const container=signal
+      ? row.querySelector('.module-message__container')||row.querySelector('.module-message')||row
+      : row.querySelector('.message-in,.message-out')||row;
+    container.appendChild(box);
   }
   box.textContent='';
   const head=document.createElement('div');
@@ -988,19 +1033,18 @@ const voiceApplyScript = (
 
 const processVoices = async (service: string, contents: WebContents) => {
   const target = liveTargets.get(contents.id);
-  if (service !== 'whatsapp' || !target || target.voiceBusy || contents.isDestroyed()) return;
+  if (!VOICE_SERVICES.has(service) || !target || target.voiceBusy || contents.isDestroyed()) return;
   target.voiceBusy = true;
+  const show = (id: string, label: string, transcript: string, translation: string) =>
+    runVoiceScript(service, contents, voiceApplyScript(service, id, label, transcript, translation));
   try {
-    const ids: string[] = await contents.executeJavaScript(voiceScanScript(), true);
+    const ids: string[] = await runVoiceScript(service, contents, voiceScanScript(service));
     const id = (Array.isArray(ids) ? ids : []).find(item => !target.voiceDone.has(item));
     if (!id) return;
     target.voiceDone.add(id);
-    const audio = await contents.executeJavaScript(voiceAudioScript(id), true);
+    const audio = await runVoiceScript(service, contents, voiceAudioScript(service, id));
     if (!audio?.ok) {
-      await contents.executeJavaScript(
-        voiceApplyScript(id, '语音', String(audio?.message || '读取语音失败'), ''),
-        true,
-      );
+      await show(id, '语音', String(audio?.message || '读取语音失败'), '');
       return;
     }
     const file = join(tmpdir(), `mactranslate-voice-${randomUUID()}.wav`);
@@ -1013,29 +1057,20 @@ const processVoices = async (service: string, contents: WebContents) => {
     }
     if (contents.isDestroyed()) return;
     if (!transcript.ok || !transcript.text) {
-      await contents.executeJavaScript(
-        voiceApplyScript(id, '语音', transcript.message || '没有识别出文字', ''),
-        true,
-      );
+      await show(id, '语音', transcript.message || '没有识别出文字', '');
       return;
     }
     const translated = await translateItems([{ id: 'voice', text: transcript.text }]);
     const result = translated.results[0];
-    const label = `语音 · ${result?.sourceLanguage || transcript.locale} → ${result?.targetLanguage || ''}`;
     if (contents.isDestroyed()) return;
-    await contents.executeJavaScript(
-      voiceApplyScript(
-        id,
-        label,
-        transcript.text,
-        result?.status === 'ok'
-          ? result.translatedText || ''
-          : result?.message || '翻译失败',
-      ),
-      true,
+    await show(
+      id,
+      `语音 · ${result?.sourceLanguage || transcript.locale} → ${result?.targetLanguage || ''}`,
+      transcript.text,
+      result?.status === 'ok' ? result.translatedText || '' : result?.message || '翻译失败',
     );
   } catch {
-    // The chat may have changed while the voice note was processed.
+    // The chat may have changed while the voice message was processed.
   } finally {
     const current = liveTargets.get(contents.id);
     if (current) current.voiceBusy = false;
