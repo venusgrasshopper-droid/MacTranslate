@@ -884,9 +884,9 @@ const processComposer = async (service: string, contents: WebContents) => {
   }
 };
 
-// --- Voice messages (WhatsApp, Signal): on-device speech-to-text, then translation ---
+// --- Voice messages (WhatsApp, Signal, Telegram): on-device speech-to-text, then translation ---
 
-const VOICE_SERVICES = new Set(['whatsapp', 'signal']);
+const VOICE_SERVICES = new Set(['whatsapp', 'signal', 'telegram']);
 // Signal's renderer state (reduxStore, attachment URLs) lives in its preload
 // world, which Electron runs as isolated world 999.
 const SIGNAL_PRELOAD_WORLD = 999;
@@ -941,6 +941,17 @@ const voiceScanScript = (service: string) => String.raw`
     }
     return ids;
   }
+  if(${JSON.stringify(service)}==='telegram'){
+    const chatId=String(location.hash.replace(/^#/,'').split('?')[0].split('_')[0]||'');
+    if(!/^-?[0-9]+$/.test(chatId))return [];
+    for(const row of [...document.querySelectorAll('.Message.message-list-item[data-message-id]')].slice(-60)){
+      if(!visibleRow(row)||row.classList.contains('own')||row.querySelector('.mactranslate-voice'))continue;
+      if(!row.querySelector('.message-content.voice'))continue;
+      const id=chatId+'|'+row.getAttribute('data-message-id');
+      if(!ids.includes(id))ids.push(id);
+    }
+    return ids;
+  }
   let Msg=null;
   try{Msg=window.require?.('WAWebCollections')?.Msg;}catch{}
   if(!Msg)return [];
@@ -976,6 +987,51 @@ const voiceAudioScript = (service: string, id: string) => String.raw`
       if(!response.ok)return {ok:false,message:'读取语音失败'};
       return {ok:true,wav:await toWavBase64(await response.arrayBuffer())};
     }
+    if(${JSON.stringify(service)}==='telegram'){
+      const [chatId,messageId]=id.split('|');
+      const slot=Number(new URL(location.href).searchParams.get('account'))||1;
+      const channel=new BroadcastChannel('tt-global_'+slot);
+      const token=Math.floor(Math.random()*1000000000)+1000000;
+      const pending=new Map();
+      channel.addEventListener('message',event=>{
+        const data=event?.data;
+        if(data?.type!=='messageResponse'||data.token!==token)return;
+        const resolve=pending.get(data.messageId);
+        if(resolve){pending.delete(data.messageId);resolve(data.response);}
+      });
+      const callApi=(name,args,timeoutMs=30000)=>new Promise((resolve,reject)=>{
+        const requestId='mactr-voice-'+Date.now()+'-'+Math.random().toString(36).slice(2);
+        const timer=setTimeout(()=>{pending.delete(requestId);reject(new Error('Telegram 接口超时'));},timeoutMs);
+        pending.set(requestId,response=>{clearTimeout(timer);resolve(response);});
+        channel.postMessage({type:'callApi',token,messageId:requestId,name,args});
+      });
+      try{
+        let chat={id:chatId};
+        // Channels and supergroups need the chat (with its access hash) from the chat list.
+        if(BigInt(chatId)<-1000000000000n){
+          const cache=window.__MACTRANSLATE_TG_CHATS__||(window.__MACTRANSLATE_TG_CHATS__=new Map());
+          for(const archived of [false,true]){
+            let args={limit:100,archived,withPinned:!archived};
+            for(let page=0;page<(archived?2:5)&&!cache.has(chatId);page++){
+              const result=await callApi('fetchChats',[args]);
+              for(const item of result?.chats||[])if(item?.id)cache.set(String(item.id),item);
+              const nextId=Number(result?.nextOffsetId||0);const nextPeer=String(result?.nextOffsetPeerId||'');const nextDate=Number(result?.nextOffsetDate||0);
+              if(!nextId||!nextPeer||!nextDate)break;
+              args={limit:100,archived,withPinned:false,offsetDate:nextDate,offsetPeer:cache.get(nextPeer)||{id:nextPeer},offsetId:nextId};
+            }
+          }
+          if(!cache.has(chatId))return {ok:false,message:'找不到这个群组，语音未转文字'};
+          chat=cache.get(chatId);
+        }
+        const found=await callApi('fetchMessage',[{chat,messageId:Number(messageId)}]);
+        const voice=found?.message?.content?.voice;
+        if(!voice?.id)return {ok:false,message:'读取语音失败'};
+        const media=await callApi('downloadMedia',[{url:'document'+voice.id,mediaFormat:0}],60000);
+        const blob=media?.dataBlob;
+        if(!(blob instanceof Blob))return {ok:false,message:'语音下载失败'};
+        return {ok:true,wav:await toWavBase64(await blob.arrayBuffer())};
+      }finally{channel.close();}
+    }
     const {Msg}=window.require('WAWebCollections');
     const msg=Msg.get(id)||(await Msg.getMessagesById([id]))?.messages?.[0];
     if(!msg||!msg.mediaData||msg.mediaData.mediaStage==='REUPLOADING')return {ok:false,message:'语音还不能下载'};
@@ -1001,16 +1057,21 @@ const voiceApplyScript = (
   const id=${JSON.stringify(id)};
   const escape=value=>globalThis.CSS?.escape?CSS.escape(value):String(value).replace(/["]/g,'');
   const signal=${JSON.stringify(service)}==='signal';
-  const row=document.querySelector(signal?'[data-message-id="'+escape(id)+'"][role="listitem"]':'[data-id="'+escape(id)+'"]');
+  const telegram=${JSON.stringify(service)}==='telegram';
+  const row=telegram
+    ? document.querySelector('.Message.message-list-item[data-message-id="'+escape(id.split('|')[1])+'"]')
+    : document.querySelector(signal?'[data-message-id="'+escape(id)+'"][role="listitem"]':'[data-id="'+escape(id)+'"]');
   if(!row)return false;
   let box=row.querySelector('.mactranslate-voice');
   if(!box){
     box=document.createElement('div');
     box.className='mactranslate-voice';
     box.style.cssText='display:block;box-sizing:border-box;margin:4px 6px 2px;padding:4px 8px;border-left:2px solid #0a84ff;border-radius:3px;background:rgba(10,132,255,.08);color:inherit;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-width:520px;user-select:text;';
-    const container=signal
-      ? row.querySelector('.module-message__container')||row.querySelector('.module-message')||row
-      : row.querySelector('.message-in,.message-out')||row;
+    const container=telegram
+      ? row.querySelector('.message-content.voice')||row
+      : signal
+        ? row.querySelector('.module-message__container')||row.querySelector('.module-message')||row
+        : row.querySelector('.message-in,.message-out')||row;
     container.appendChild(box);
   }
   box.textContent='';
