@@ -14,8 +14,10 @@
 // one-shot runs.
 
 import AppKit
+import AVFAudio
 import Foundation
 import NaturalLanguage
+import Speech
 import SwiftUI
 import Translation
 
@@ -359,6 +361,85 @@ func translateItems(
   return results
 }
 
+// MARK: - Voice transcription (--transcribe <wav>)
+
+struct TranscriptionOutput: Encodable {
+  let ok: Bool
+  var text: String?
+  var locale: String?
+  var message: String?
+}
+
+let dictationDisabledMessage = "请在「系统设置 → 键盘」中打开「听写」后再试"
+
+/// On-device speech recognition. Chinese first; if the result has no Han
+/// characters the audio is English, so it is recognized again as en-US
+/// (each model turns the other language into gibberish).
+func transcribeFile(_ path: String) async -> TranscriptionOutput {
+  let authorization = await withCheckedContinuation { continuation in
+    SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+  }
+  guard authorization == .authorized else {
+    return TranscriptionOutput(ok: false, message: "没有语音识别权限，请在「系统设置 → 隐私与安全性 → 语音识别」中允许 MacTranslate")
+  }
+  let url = URL(fileURLWithPath: path)
+  do {
+    let chinese = try await recognize(url, locale: "zh-CN")
+    if chinese.unicodeScalars.contains(where: isHan) {
+      return TranscriptionOutput(ok: true, text: chinese, locale: "zh-CN")
+    }
+    let english = try await recognize(url, locale: "en-US")
+    return TranscriptionOutput(ok: true, text: english, locale: "en-US")
+  } catch {
+    let text = String(describing: error)
+    return TranscriptionOutput(ok: false, message: text.contains("Dictation are disabled") ? dictationDisabledMessage : "语音转文字失败：\(text)")
+  }
+}
+
+func recognize(_ url: URL, locale: String) async throws -> String {
+  if #available(macOS 26.0, *) {
+    let transcriber = SpeechTranscriber(locale: Locale(identifier: locale), preset: .transcription)
+    if await AssetInventory.status(forModules: [transcriber]) != .installed,
+       let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+      try await request.downloadAndInstall()
+    }
+    let audio = try AVAudioFile(forReading: url)
+    let analyzer = SpeechAnalyzer(modules: [transcriber])
+    let collector = Task { () -> String in
+      var text = ""
+      for try await result in transcriber.results where result.isFinal {
+        text += String(result.text.characters)
+      }
+      return text
+    }
+    if let end = try await analyzer.analyzeSequence(from: audio) {
+      try await analyzer.finalizeAndFinish(through: end)
+    } else {
+      await analyzer.cancelAndFinishNow()
+    }
+    return try await collector.value.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+  // macOS 15: the older recognizer, which needs Dictation turned on.
+  guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
+    throw NSError(domain: "MacTranslate", code: 1, userInfo: [NSLocalizedDescriptionKey: "不支持 \(locale) 语音识别"])
+  }
+  let request = SFSpeechURLRecognitionRequest(url: url)
+  request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+  return try await withCheckedThrowingContinuation { continuation in
+    var finished = false
+    recognizer.recognitionTask(with: request) { result, error in
+      if finished { return }
+      if let error {
+        finished = true
+        continuation.resume(throwing: error)
+      } else if let result, result.isFinal {
+        finished = true
+        continuation.resume(returning: result.bestTranscription.formattedString)
+      }
+    }
+  }
+}
+
 // MARK: - App host
 
 final class TranslationHostAppDelegate: NSObject, NSApplicationDelegate {
@@ -466,6 +547,16 @@ final class TranslationHostAppDelegate: NSObject, NSApplicationDelegate {
       writeLine(TranslationOutputEnvelope(ok: false, engine: engineName, results: [], message: String(describing: error)))
     }
   }
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--transcribe"),
+   index + 1 < CommandLine.arguments.count {
+  let path = CommandLine.arguments[index + 1]
+  Task {
+    writeLine(await transcribeFile(path))
+    exit(0)
+  }
+  dispatchMain()
 }
 
 let serverMode = CommandLine.arguments.dropFirst().contains("--server")

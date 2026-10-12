@@ -419,3 +419,51 @@ export const translateWithMacOS = async (
   });
   return { ok: true, engine: 'macOS Translation', results };
 };
+
+export interface VoiceTranscription {
+  ok: boolean;
+  text?: string;
+  locale?: string;
+  message?: string;
+}
+
+const TRANSCRIBE_TIMEOUT_MS = 180_000;
+
+// On-device speech-to-text of a WAV/M4A file (helper --transcribe).
+export const transcribeVoiceFile = async (
+  file: string,
+): Promise<VoiceTranscription> => {
+  if (process.platform !== 'darwin' || !systemSupportsTranslation()) {
+    return { ok: false, message: '语音转文字需要 macOS 15 或更新版本' };
+  }
+  const helperPath = executableHelperPath();
+  if (!existsSync(helperPath)) {
+    return { ok: false, message: `系统翻译组件不存在：${helperPath}` };
+  }
+  return new Promise(resolve => {
+    const child = spawn(helperPath, ['--transcribe', file], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      resolve({ ok: false, message: '语音转文字超时' });
+    }, TRANSCRIBE_TIMEOUT_MS);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+    });
+    child.on('error', error => {
+      clearTimeout(timer);
+      resolve({ ok: false, message: error.message });
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      try {
+        resolve(JSON.parse(stdout.trim().split(/\r?\n/).at(-1) || ''));
+      } catch {
+        resolve({ ok: false, message: '语音转文字失败' });
+      }
+    });
+  });
+};

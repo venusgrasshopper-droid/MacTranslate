@@ -40,6 +40,7 @@ mac:
     NSCameraUsageDescription: "MacTranslate requires camera access for Signal and other video calls."
     NSMicrophoneUsageDescription: "MacTranslate requires microphone access for Signal and other voice calls."
     NSFocusStatusUsageDescription: "MacTranslate requires Focus access for Do Not Disturb integration."
+    NSSpeechRecognitionUsageDescription: "MacTranslate 在本机把收到的语音转成文字。"
 
 dmg:
   artifactName: "MacTranslate-v12.4.3-${version}-${arch}.${ext}"
