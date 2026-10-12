@@ -2,12 +2,13 @@
 
 import { Buffer } from 'node:buffer';
 import { existsSync } from 'node:fs';
-import { Menu, shell, WebContentsView, type BrowserWindow } from 'electron';
+import { ipcMain, Menu, shell, WebContentsView, type BrowserWindow } from 'electron';
 import { signalContextMenuTemplate } from './signalContextMenu';
 import {
   bindSignalWebContents,
   embeddedSignalPreparationError,
   getEmbeddedSignalRuntimePaths,
+  getSignalAccountIdForWebContents,
   unbindSignalWebContents,
   waitForEmbeddedSignalEngine,
 } from './EmbeddedSignalEngine';
@@ -241,7 +242,7 @@ class SignalAccountView {
       // TranGPT's embedded Signal renderer starts only after this message.
       // The preload also reads the same account synchronously through get-user-id.
       contents.send('set-user-id', this.serviceId);
-      contents.send('set-window-focus', this.active);
+      contents.send('set-window-focus', this.isLookedAt());
       this.setState('running');
     });
 
@@ -387,10 +388,28 @@ class SignalAccountView {
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.applyBounds();
       this.view.setVisible(true);
-      this.view.webContents.send('set-window-focus', true);
+      this.view.webContents.send('set-window-focus', this.isLookedAt());
       this.view.webContents.focus();
     }
     return this.status();
+  }
+
+  // Signal suppresses notifications while it believes it is focused, so it is
+  // only "focused" when it is the shown service AND MacTranslate is in front.
+  private isLookedAt(): boolean {
+    return (
+      this.active &&
+      !this.parentWindow.isDestroyed() &&
+      this.parentWindow.isFocused() &&
+      this.parentWindow.isVisible() &&
+      !this.parentWindow.isMinimized()
+    );
+  }
+
+  updateFocus(): void {
+    if (this.view && !this.view.webContents.isDestroyed()) {
+      this.view.webContents.send('set-window-focus', this.isLookedAt());
+    }
   }
 
   deactivate(): SignalHostStatus {
@@ -516,6 +535,21 @@ export default class SignalRuntimeHost {
     parentWindow.on('minimize', () => this.hideAll());
     parentWindow.on('show', () => this.showActive());
     parentWindow.once('closed', () => this.destroyAll());
+    for (const event of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore'] as const) {
+      parentWindow.on(event as any, () => this.updateFocus());
+    }
+
+    // Signal reports its unread count by sending 'set-badge' to its main
+    // process; forward it so the account's sidebar icon shows it.
+    ipcMain.on('set-badge', (event, value: number | string) => {
+      const serviceId = getSignalAccountIdForWebContents(event.sender);
+      if (!serviceId || parentWindow.isDestroyed()) return;
+      parentWindow.webContents.send('signal-host:badge', serviceId, value);
+    });
+  }
+
+  private updateFocus(): void {
+    for (const account of this.accounts.values()) account.updateFocus();
   }
 
   runtimeStatus(): {

@@ -238,10 +238,23 @@ export default class ServicesStore extends TypedStore {
     );
   }
 
+  // Embedded Signal accounts have no recipe; their unread count arrives from
+  // the Signal host instead of a webview 'message-counts' message.
+  signalBadgeCallback = (_event, serviceId: string, value: number | string) => {
+    this.actions.service.setUnreadMessageCount({
+      serviceId,
+      count: {
+        direct: typeof value === 'number' ? value : 0,
+        indirect: value === 'marked-unread' ? 1 : 0,
+      },
+    });
+  };
+
   initialize() {
     super.initialize();
 
     ipcRenderer.on('toggle-to-talk', this.toggleToTalkCallback);
+    ipcRenderer.on('signal-host:badge', this.signalBadgeCallback);
 
     // Check services to become hibernated
     this.serviceMaintenanceTick();
@@ -251,6 +264,7 @@ export default class ServicesStore extends TypedStore {
     super.teardown();
 
     ipcRenderer.off('toggle-to-talk', this.toggleToTalkCallback);
+    ipcRenderer.off('signal-host:badge', this.signalBadgeCallback);
 
     // Stop checking services for hibernation
     this.serviceMaintenanceTick.cancel();
