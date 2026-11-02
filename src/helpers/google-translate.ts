@@ -1,8 +1,17 @@
 import { net } from 'electron';
+import translateWebsite from 'google-translate-api-x';
 
-// All translation goes through Google Translate's free web endpoint, which
-// also returns alternative translations per sentence (dt=at).
+// Free Google Translate, two entrances with separate limits:
+// - translate.google.com (what the website itself uses) for normal text;
+// - translate.googleapis.com, which also returns sentence alternatives (dt=at).
+// An entrance that fails is left alone for 10 minutes.
 const ENDPOINT = 'https://translate.googleapis.com/translate_a/single';
+const CHANNEL_COOLDOWN_MS = 10 * 60_000;
+let websiteBlockedUntil = 0;
+let apiBlockedUntil = 0;
+
+export const googleAvailable = (): boolean =>
+  Date.now() >= websiteBlockedUntil || Date.now() >= apiBlockedUntil;
 const TIMEOUT_MS = 8000;
 const CACHE_LIMIT = 500;
 const CONCURRENCY = 4;
@@ -43,7 +52,10 @@ export interface GoogleTranslation {
 }
 
 const translationCache = new Map<string, GoogleTranslation>();
-const textCache = new Map<string, Omit<TranslationResult, 'id' | 'originalText'>>();
+const textCache = new Map<
+  string,
+  Omit<TranslationResult, 'id' | 'originalText'>
+>();
 
 const remember = <T>(cache: Map<string, T>, key: string, value: T) => {
   cache.delete(key);
@@ -82,6 +94,9 @@ export const googleTranslateWithAlternatives = async (
   from = 'zh-CN',
   to = 'en',
 ): Promise<GoogleTranslation> => {
+  if (Date.now() < apiBlockedUntil) {
+    return { ok: false, sentences: [], message: '谷歌翻译接口暂时受限' };
+  }
   const key = JSON.stringify([from, to, text]);
   const cached = translationCache.get(key);
   if (cached) return cached;
@@ -113,6 +128,7 @@ export const googleTranslateWithAlternatives = async (
     remember(translationCache, key, result);
     return result;
   } catch (error) {
+    apiBlockedUntil = Date.now() + CHANNEL_COOLDOWN_MS;
     return {
       ok: false,
       sentences: [],
@@ -136,31 +152,62 @@ const translateText = async (
     return { status: 'unsupportedLanguage', message: '当前只自动处理中英文' };
   }
   const target = chinese ? 'en' : 'zh-CN';
-  try {
-    // Any Han character means Chinese: auto-detect calls 'send me the 合同' English.
-    const data = await request(
-      { sl: chinese ? 'zh-CN' : 'auto', tl: target, q: trimmed },
-      ['t'],
-    );
-    const translatedText = (data.sentences ?? [])
-      .map((item: any) => item.trans ?? '')
-      .join('')
-      .trim();
-    if (!translatedText) throw new Error('谷歌翻译没有返回结果');
-    const result = {
-      status: 'ok',
-      translatedText,
-      sourceLanguage: languageLabel(String(data.src ?? (chinese ? 'zh-CN' : 'en'))),
-      targetLanguage: languageLabel(target),
-    };
-    remember(textCache, trimmed, result);
-    return result;
-  } catch (error) {
-    return {
-      status: 'translationError',
-      message: `谷歌翻译不可用：${error instanceof Error ? error.message : String(error)}`,
-    };
+  // Any Han character means Chinese: auto-detect calls 'send me the 合同' English.
+  const from = chinese ? 'zh-CN' : 'auto';
+  if (Date.now() >= websiteBlockedUntil) {
+    try {
+      const web = await Promise.race([
+        translateWebsite(trimmed, {
+          from,
+          to: target,
+          forceBatch: true,
+          fallbackBatch: false,
+          requestFunction: (url: string, init: RequestInit) =>
+            net.fetch(url, init),
+        }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('timeout')), TIMEOUT_MS);
+        }),
+      ]);
+      const translatedText = String(web.text ?? '').trim();
+      if (!translatedText) throw new Error('谷歌翻译没有返回结果');
+      const result = {
+        status: 'ok',
+        translatedText,
+        sourceLanguage: languageLabel(
+          String(web.from?.language?.iso || (chinese ? 'zh-CN' : 'en')),
+        ),
+        targetLanguage: languageLabel(target),
+      };
+      remember(textCache, trimmed, result);
+      return result;
+    } catch {
+      websiteBlockedUntil = Date.now() + CHANNEL_COOLDOWN_MS;
+    }
   }
+  if (Date.now() >= apiBlockedUntil) {
+    try {
+      const data = await request({ sl: from, tl: target, q: trimmed }, ['t']);
+      const translatedText = (data.sentences ?? [])
+        .map((item: any) => item.trans ?? '')
+        .join('')
+        .trim();
+      if (!translatedText) throw new Error('谷歌翻译没有返回结果');
+      const result = {
+        status: 'ok',
+        translatedText,
+        sourceLanguage: languageLabel(
+          String(data.src ?? (chinese ? 'zh-CN' : 'en')),
+        ),
+        targetLanguage: languageLabel(target),
+      };
+      remember(textCache, trimmed, result);
+      return result;
+    } catch {
+      apiBlockedUntil = Date.now() + CHANNEL_COOLDOWN_MS;
+    }
+  }
+  return { status: 'translationError', message: '谷歌翻译暂时不可用' };
 };
 
 export const translateWithGoogle = async (
@@ -192,6 +239,6 @@ export const warmGoogleConnection = (): void => {
   if (Date.now() - lastWarmAt < 30_000) return;
   lastWarmAt = Date.now();
   void net
-    .fetch('https://translate.googleapis.com/', { method: 'HEAD' })
+    .fetch('https://translate.google.com/', { method: 'HEAD' })
     .catch(() => {});
 };

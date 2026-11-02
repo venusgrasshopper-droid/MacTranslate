@@ -558,8 +558,8 @@ const composerBridgeScript = (service: string) =>
 `;
 
 // Chinese in the composer comes with Google's sentence alternatives, like
-// translate.google.com; English only gets a reference translation. Without
-// Google (rate limited / unreachable) Apple's translation is used, no choices.
+// translate.google.com; English only gets a reference translation. When the
+// alternatives entrance is limited, plain translation is used, no choices.
 const translateComposer = async (
   text: string,
   direction: string,
