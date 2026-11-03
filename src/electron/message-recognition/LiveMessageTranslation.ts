@@ -75,6 +75,16 @@ const liveTargets = new Map<number, LiveTarget>();
 const sentenceMeanings = new Map<string, string>();
 const SENTENCE_MEANING_LIMIT = 2000;
 const meaningsInFlight = new Set<string>();
+const rememberMeaning = (text: string, meaning: string) => {
+  const value = meaning.trim();
+  if (!value) return;
+  sentenceMeanings.delete(text);
+  sentenceMeanings.set(text, value);
+  if (sentenceMeanings.size > SENTENCE_MEANING_LIMIT) {
+    const oldest = sentenceMeanings.keys().next().value;
+    if (oldest !== undefined) sentenceMeanings.delete(oldest);
+  }
+};
 const globalTranslations = new Map<string, TranslationResult>();
 const GLOBAL_TRANSLATION_LIMIT = 4000;
 const SCAN_LIMIT = 40;
@@ -404,6 +414,7 @@ const composerBridgeScript = (service: string) =>
     const current=sentence.textContent.trim();
     const popup=document.createElement('div');
     popup.className='mactranslate-choices';
+    popup.__sentence=sentence;
     popup.style.cssText='position:fixed;z-index:2147483647;max-width:440px;max-height:50vh;overflow:auto;padding:4px 0;border-radius:8px;background:#fff;color:#111;box-shadow:0 6px 24px rgba(0,0,0,.25);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
     for(const choice of choices){
       const selected=choice.text.trim()===current;
@@ -413,7 +424,9 @@ const composerBridgeScript = (service: string) =>
       const english=document.createElement('div');
       english.textContent=(selected?'✓ ':'')+choice.text;
       const meaning=document.createElement('div');
-      meaning.textContent=choice.meaning||'';
+      meaning.className='mactranslate-choice-meaning';
+      meaning.dataset.choice=choice.text.trim();
+      meaning.textContent=choice.meaning||'正在翻译…';
       meaning.style.cssText='font-size:12px;color:#666;margin-top:1px;';
       item.append(english,meaning);
       item.addEventListener('mouseenter',()=>{item.style.background='rgba(10,132,255,.16)';});
@@ -423,7 +436,8 @@ const composerBridgeScript = (service: string) =>
         event.stopPropagation();
         const trailing=sentence.textContent.endsWith(' ')?' ':'';
         sentence.textContent=choice.text.trim()+trailing;
-        if(choice.meaning){sentence.dataset.meaning=choice.meaning;sentence.dataset.meaningFor=choice.text.trim();}
+        const picked=JSON.parse(sentence.dataset.choices||'[]').find(item=>item.text.trim()===choice.text.trim());
+        if(picked?.meaning){sentence.dataset.meaning=picked.meaning;sentence.dataset.meaningFor=choice.text.trim();}
         commitPreview(value);
       });
       popup.appendChild(item);
@@ -432,6 +446,15 @@ const composerBridgeScript = (service: string) =>
     const rect=popup.getBoundingClientRect();
     popup.style.left=Math.max(8,Math.min(x,innerWidth-rect.width-8))+'px';
     popup.style.top=(y+16+rect.height<innerHeight?y+16:Math.max(8,y-rect.height-8))+'px';
+  };
+  window.__MACTRANSLATE_REFRESH_CHOICES__=()=>{
+    const popup=document.querySelector('.mactranslate-choices');
+    if(!popup?.__sentence)return;
+    const choices=JSON.parse(popup.__sentence.dataset.choices||'[]');
+    for(const node of popup.querySelectorAll('.mactranslate-choice-meaning')){
+      const choice=choices.find(item=>item.text.trim()===node.dataset.choice);
+      if(choice?.meaning)node.textContent=choice.meaning;
+    }
   };
   if(!window.__MACTRANSLATE_CHOICES_R31__){
     window.__MACTRANSLATE_CHOICES_R31__=true;
@@ -634,7 +657,7 @@ const translateComposer = async (
       ...item,
       choices: item.alternatives.map(alternative => ({
         text: alternative,
-        meaning: '',
+        meaning: sentenceMeanings.get(alternative.trim()) ?? '',
       })),
     })),
   };
@@ -647,21 +670,34 @@ const fillChoiceMeanings = async (
   sentences: ComposerSentence[],
 ) => {
   const alternatives = [
-    ...new Set(sentences.flatMap(item => item.alternatives)),
+    ...new Set(
+      sentences
+        .flatMap(item => item.alternatives)
+        .map(text => text.trim())
+        .filter(Boolean),
+    ),
   ];
-  // One request for all choices, one per line, to keep Google traffic low.
-  const response = await translateWithGoogle([
-    { id: 'meanings', text: alternatives.join('\n') },
-  ]);
-  const lines = String(response.results[0]?.translatedText ?? '').split('\n');
-  if (lines.length !== alternatives.length) return;
-  const meaningOf: Record<string, string> = {};
-  alternatives.forEach((alternative, index) => {
-    meaningOf[alternative] = lines[index].trim();
-  });
-  if (contents.isDestroyed()) return;
+  // Choices seen before keep their meaning; the rest go in one request, one
+  // per line, to keep Google traffic low.
+  const missing = alternatives.filter(text => !sentenceMeanings.has(text));
+  if (missing.length > 0) {
+    const response = await translateWithGoogle([
+      { id: 'meanings', text: missing.join('\n') },
+    ]);
+    const lines = String(response.results[0]?.translatedText ?? '').split('\n');
+    if (lines.length === missing.length) {
+      missing.forEach((text, index) => rememberMeaning(text, lines[index]));
+    }
+  }
+  const meaningOf = Object.fromEntries(
+    alternatives
+      .filter(text => sentenceMeanings.has(text))
+      .map(text => [text, sentenceMeanings.get(text)]),
+  );
+  if (Object.keys(meaningOf).length === 0 || contents.isDestroyed()) return;
+  // An open choice list gets the meanings as soon as they arrive.
   await contents.executeJavaScript(
-    `(()=>{const preview=document.querySelector('.mactranslate-composer-translation');if(preview?.dataset.mactranslateAppliedSource!==${JSON.stringify(sourceText)})return;const meanings=${JSON.stringify(meaningOf)};for(const span of preview.querySelectorAll('.mactranslate-sentence')){const choices=JSON.parse(span.dataset.choices||'[]');span.dataset.choices=JSON.stringify(choices.map(choice=>({...choice,meaning:meanings[choice.text]||choice.meaning})));}})()`,
+    `(()=>{const preview=document.querySelector('.mactranslate-composer-translation');if(preview?.dataset.mactranslateAppliedSource!==${JSON.stringify(sourceText)})return;const meanings=${JSON.stringify(meaningOf)};for(const span of preview.querySelectorAll('.mactranslate-sentence')){const choices=JSON.parse(span.dataset.choices||'[]');span.dataset.choices=JSON.stringify(choices.map(choice=>({...choice,meaning:meanings[choice.text.trim()]||choice.meaning})));}window.__MACTRANSLATE_REFRESH_CHOICES__?.();})()`,
     true,
   );
 };
@@ -703,15 +739,9 @@ const fillSentenceMeanings = async (
             : '';
         });
       }
-      wanted.forEach((text, index) => {
-        const meaning = lines[index]?.trim();
-        if (!meaning) return;
-        sentenceMeanings.set(text, meaning);
-        if (sentenceMeanings.size > SENTENCE_MEANING_LIMIT) {
-          const oldest = sentenceMeanings.keys().next().value;
-          if (oldest !== undefined) sentenceMeanings.delete(oldest);
-        }
-      });
+      wanted.forEach((text, index) =>
+        rememberMeaning(text, lines[index] ?? ''),
+      );
     } finally {
       for (const text of wanted) meaningsInFlight.delete(text);
     }
