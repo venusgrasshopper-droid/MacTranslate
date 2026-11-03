@@ -75,6 +75,20 @@ try {
     );
   }
 
+  // Signal opens 4 SQLite worker threads per account (about 25 MB each). With
+  // many accounts running at once one worker per account is enough.
+  const stagedSignalMain = path.join(stagedSignalRoot, 'bundles', 'main.js');
+  const sqlPoolSource = fs.readFileSync(stagedSignalMain, 'utf8');
+  const sqlPoolFrom =
+    'constructor(){let e=[];for(let t=0;t<4;t+=1){let{worker:t,onExit:n}=this.#T()';
+  if (sqlPoolSource.split(sqlPoolFrom).length !== 2) {
+    fail('Signal SQL worker pool pattern not found in bundles/main.js');
+  }
+  fs.writeFileSync(
+    stagedSignalMain,
+    sqlPoolSource.replace(sqlPoolFrom, sqlPoolFrom.replace('t<4', 't<1')),
+  );
+
   const stagedRootNodeModules = path.join(stagingApp, 'node_modules');
   const stagedSignalNodeModules = path.join(stagedSignalRoot, 'node_modules');
   fs.mkdirSync(stagedRootNodeModules, { recursive: true });
