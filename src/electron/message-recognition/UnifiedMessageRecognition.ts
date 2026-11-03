@@ -2,14 +2,13 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  app,
-  webContents,
-  type WebContents,
-} from 'electron';
+import { createInterface } from 'node:readline';
+import v8 from 'node:v8';
+import { app, ipcMain, webContents, type WebContents } from 'electron';
 import { getSignalAccountIdForWebContents } from '../signal/EmbeddedSignalEngine';
 import {
   armLiveMessageTranslation,
@@ -47,7 +46,11 @@ export type RecognizedChatMessage = {
   senderName: string;
   direction: MessageDirection;
   sentAt: number;
-  timestampQuality: 'provider' | 'rendered-full' | 'observed-preview' | 'fallback-observed';
+  timestampQuality:
+    | 'provider'
+    | 'rendered-full'
+    | 'observed-preview'
+    | 'fallback-observed';
   text: string;
   providerEvent: string;
   observedAt: number;
@@ -88,7 +91,6 @@ type AttachedTarget = {
   retryTimer: NodeJS.Timeout | null;
   signalCacheTimer: NodeJS.Timeout | null;
   signalCacheBusy: boolean;
-  signalHistoryPrimed: boolean;
 };
 
 const targets = new Map<number, AttachedTarget>();
@@ -139,7 +141,11 @@ export function recognitionDirectory(): string {
   // Keep the archive path stable on macOS regardless of package/app-name changes.
   // The acceptance/check scripts use the same canonical location.
   if (process.platform === 'darwin') {
-    return path.join(app.getPath('appData'), 'MacTranslate', 'MessageRecognitionV6');
+    return path.join(
+      app.getPath('appData'),
+      'MacTranslate',
+      'MessageRecognitionV6',
+    );
   }
   return path.join(app.getPath('userData'), 'MessageRecognitionV6');
 }
@@ -203,7 +209,11 @@ function normalizeDirection(value: unknown): MessageDirection {
   return value === 'outgoing' ? 'outgoing' : 'incoming';
 }
 
-function recordMessage(target: AttachedTarget, input: CapturedPayload): void {
+function recordMessage(
+  target: AttachedTarget,
+  input: CapturedPayload,
+  logStatus = true,
+): void {
   const text = clean(input.text).slice(0, MAX_TEXT_LENGTH);
   const conversationTitle = clean(input.conversationTitle).slice(0, 4096);
   let conversationId = clean(input.conversationId).slice(0, 4096);
@@ -222,11 +232,17 @@ function recordMessage(target: AttachedTarget, input: CapturedPayload): void {
   const parsedTimestamp = hasNumericTimestamp
     ? safeTimestamp(rawSentAt)
     : Date.parse(String(input.sentAt ?? ''));
-  const hasProviderTimestamp = Number.isFinite(parsedTimestamp) && parsedTimestamp > 0;
-  const sentAt = hasProviderTimestamp ? Math.trunc(parsedTimestamp) : Date.now();
+  const hasProviderTimestamp =
+    Number.isFinite(parsedTimestamp) && parsedTimestamp > 0;
+  const sentAt = hasProviderTimestamp
+    ? Math.trunc(parsedTimestamp)
+    : Date.now();
   const requestedQuality = clean(input.timestampQuality);
   const timestampQuality: RecognizedChatMessage['timestampQuality'] =
-    requestedQuality === 'provider' || requestedQuality === 'rendered-full' || requestedQuality === 'observed-preview' || requestedQuality === 'fallback-observed'
+    requestedQuality === 'provider' ||
+    requestedQuality === 'rendered-full' ||
+    requestedQuality === 'observed-preview' ||
+    requestedQuality === 'fallback-observed'
       ? requestedQuality
       : hasProviderTimestamp
         ? 'provider'
@@ -243,7 +259,8 @@ function recordMessage(target: AttachedTarget, input: CapturedPayload): void {
     senderId,
     text,
   ].join('\u001f');
-  const messageId = providerMessageId || `derived-${sha256(derived).slice(0, 40)}`;
+  const messageId =
+    providerMessageId || `derived-${sha256(derived).slice(0, 40)}`;
   const dedupeKey = [
     target.service,
     target.serviceInstanceId,
@@ -277,6 +294,7 @@ function recordMessage(target: AttachedTarget, input: CapturedPayload): void {
   };
   appendJsonl('messages.jsonl', row);
   recognizedMessageEvents.emit('message', row);
+  if (!logStatus) return;
   recordStatus(target, 'real-message-captured', {
     conversationId,
     messageId,
@@ -284,6 +302,326 @@ function recordMessage(target: AttachedTarget, input: CapturedPayload): void {
     timestampQuality,
   });
 }
+// Messages already in the archive are not written again after a restart.
+async function seedSeenFromArchive(): Promise<void> {
+  const file = path.join(recognitionDirectory(), 'messages.jsonl');
+  try {
+    const lines = createInterface({
+      input: createReadStream(file, { encoding: 'utf8' }),
+      crlfDelay: Number.POSITIVE_INFINITY,
+    });
+    for await (const line of lines) {
+      if (!line) continue;
+      try {
+        const row = JSON.parse(line);
+        remember(
+          [
+            row.service,
+            row.serviceInstanceId,
+            row.conversationId,
+            row.messageId,
+          ].join('\u001f'),
+        );
+      } catch {
+        // A malformed line is skipped.
+      }
+    }
+  } catch {
+    // No archive yet.
+  }
+}
+
+// --- Signal history ---
+// Every Signal conversation's history goes into the archive, read straight
+// from the account's own database instead of being loaded into Signal's chat
+// view: one page from one account at a time, with a pause in between, so many
+// accounts or long histories do not weigh Signal down. Where each
+// conversation got to is saved, so a restart carries on instead of reading
+// everything again.
+const SIGNAL_HISTORY_FILE = 'signal-history.json';
+const SIGNAL_HISTORY_PAGE = 100;
+const SIGNAL_HISTORY_PAUSE_MS = 1000;
+const SIGNAL_HISTORY_WAIT_MS = 30_000;
+const SIGNAL_HISTORY_IDLE_MS = 5 * 60_000;
+
+type SignalPosition = { receivedAt: number; sentAt: number; messageId: string };
+type SignalHistoryCursor = {
+  oldest: SignalPosition | null;
+  newest: SignalPosition | null;
+  olderDone: boolean;
+  // The conversation's activity time up to which newer messages were read.
+  seenActiveAt: number;
+};
+
+let signalHistory: Record<string, Record<string, SignalHistoryCursor>> | null =
+  null;
+let signalHistorySaveTimer: NodeJS.Timeout | null = null;
+let signalHistoryTimer: NodeJS.Timeout | null = null;
+let signalHistoryNext = 0;
+const signalConversations = new Map<string, { at: number; list: any[] }>();
+
+async function loadSignalHistory(): Promise<
+  Record<string, Record<string, SignalHistoryCursor>>
+> {
+  try {
+    const raw = await readFile(
+      path.join(recognitionDirectory(), SIGNAL_HISTORY_FILE),
+      'utf8',
+    );
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSignalHistory(): void {
+  if (signalHistorySaveTimer) return;
+  signalHistorySaveTimer = setTimeout(() => {
+    signalHistorySaveTimer = null;
+    const data = JSON.stringify(signalHistory ?? {});
+    const directory = recognitionDirectory();
+    writeQueue = writeQueue
+      .then(async () => {
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        await writeFile(path.join(directory, SIGNAL_HISTORY_FILE), data, {
+          encoding: 'utf8',
+          mode: 0o600,
+        });
+      })
+      .catch(error => debug('Signal history progress write failed', error));
+  }, 5000);
+}
+
+// Signal's renderer reads its database through this IPC handler; given the
+// account id, it reads that account's database in Signal's SQL worker.
+async function signalSqlRead(
+  target: AttachedTarget,
+  method: string,
+  ...args: unknown[]
+): Promise<any> {
+  const handler = (ipcMain as any)._invokeHandlers?.get('sql-channel:read');
+  if (typeof handler !== 'function') {
+    throw new TypeError('Signal database is not ready');
+  }
+  // Electron keeps the registered function as is (older versions wrapped it
+  // and answered through _reply), so take whichever answer comes.
+  const response: any = await new Promise((resolve, reject) => {
+    Promise.resolve(
+      handler(
+        { sender: target.contents, _reply: resolve, _throw: reject },
+        method,
+        v8.serialize(args),
+        target.serviceInstanceId,
+      ),
+    ).then(resolve, reject);
+  });
+  if (!response?.ok) {
+    throw response?.error ?? new Error(`Signal ${method} failed`);
+  }
+  return v8.deserialize(Buffer.from(response.value));
+}
+
+function signalTitle(conversation: any): string {
+  return clean(
+    conversation?.name ||
+      conversation?.profileFullName ||
+      [conversation?.profileName, conversation?.profileFamilyName]
+        .filter(Boolean)
+        .join(' ') ||
+      conversation?.e164 ||
+      conversation?.username ||
+      conversation?.id,
+  );
+}
+
+function signalPosition(message: any): SignalPosition {
+  return {
+    receivedAt: Number(message.received_at) || 0,
+    sentAt: Number(message.sent_at) || 0,
+    messageId: String(message.id),
+  };
+}
+
+function signalHistoryPayload(
+  message: any,
+  conversation: any,
+  names: Map<string, string>,
+): CapturedPayload | null {
+  const text = typeof message?.body === 'string' ? message.body.trim() : '';
+  const direction =
+    message?.type === 'outgoing'
+      ? 'outgoing'
+      : message?.type === 'incoming'
+        ? 'incoming'
+        : '';
+  const sentAt = Number(message?.sent_at || message?.received_at_ms || 0);
+  if (!message?.id || !text || !direction || !sentAt) return null;
+  const senderId =
+    direction === 'outgoing'
+      ? ''
+      : String(message.sourceServiceId || message.source || '');
+  return {
+    conversationId: String(conversation.id),
+    conversationTitle: signalTitle(conversation),
+    messageId: String(message.id),
+    senderId,
+    senderName:
+      direction === 'outgoing'
+        ? ''
+        : names.get(String(message.sourceServiceId || '')) ||
+          names.get(String(message.source || '')) ||
+          '',
+    direction,
+    sentAt,
+    timestampQuality: 'provider',
+    text,
+    providerEvent: 'signal-8.17.0-local-sql-history',
+  };
+}
+
+// Reads one page for this account: older history first, then messages newer
+// than what was read once a conversation has had activity since.
+async function importSignalHistoryPage(
+  target: AttachedTarget,
+): Promise<boolean> {
+  const accountId = target.serviceInstanceId;
+  const history = signalHistory ?? {};
+  signalHistory = history;
+  history[accountId] ??= {};
+  const cursors = history[accountId];
+  let listing = signalConversations.get(accountId);
+  if (!listing || Date.now() - listing.at > SIGNAL_HISTORY_IDLE_MS) {
+    const list = await signalSqlRead(target, 'getAllConversations');
+    listing = { at: Date.now(), list: Array.isArray(list) ? list : [] };
+    signalConversations.set(accountId, listing);
+  }
+  const conversations = listing.list
+    .filter(
+      item => item?.id && (item.type === 'private' || item.type === 'group'),
+    )
+    .sort((a, b) => Number(b.active_at || 0) - Number(a.active_at || 0));
+  const names = new Map<string, string>();
+  for (const item of conversations) {
+    const title = signalTitle(item);
+    if (item.serviceId) names.set(String(item.serviceId), title);
+    if (item.e164) names.set(String(item.e164), title);
+  }
+
+  for (const conversation of conversations) {
+    const activeAt = Number(conversation.active_at || 0);
+    const cursor: SignalHistoryCursor = cursors[conversation.id] ?? {
+      oldest: null,
+      newest: null,
+      olderDone: false,
+      seenActiveAt: activeAt,
+    };
+    let messages: any[];
+    if (!cursor.olderDone) {
+      // Newest first.
+      messages = await signalSqlRead(target, 'getOlderMessagesByConversation', {
+        conversationId: conversation.id,
+        includeStoryReplies: false,
+        limit: SIGNAL_HISTORY_PAGE,
+        storyId: undefined,
+        ...(cursor.oldest
+          ? {
+              receivedAt: cursor.oldest.receivedAt,
+              sentAt: cursor.oldest.sentAt,
+              messageId: cursor.oldest.messageId,
+            }
+          : {}),
+      });
+      if (!Array.isArray(messages)) messages = [];
+      if (messages.length > 0) {
+        cursor.oldest = signalPosition(messages.at(-1));
+        cursor.newest ??= signalPosition(messages[0]);
+      }
+      if (messages.length < SIGNAL_HISTORY_PAGE) cursor.olderDone = true;
+    } else if (activeAt > cursor.seenActiveAt) {
+      // Oldest first.
+      messages = await signalSqlRead(target, 'getNewerMessagesByConversation', {
+        conversationId: conversation.id,
+        includeStoryReplies: false,
+        limit: SIGNAL_HISTORY_PAGE,
+        storyId: undefined,
+        receivedAt: cursor.newest?.receivedAt ?? 0,
+        sentAt: cursor.newest?.sentAt ?? 0,
+      });
+      if (!Array.isArray(messages)) messages = [];
+      if (messages.length > 0) cursor.newest = signalPosition(messages.at(-1));
+      if (messages.length < SIGNAL_HISTORY_PAGE) cursor.seenActiveAt = activeAt;
+    } else {
+      continue;
+    }
+    cursors[conversation.id] = cursor;
+    let recorded = 0;
+    for (const message of messages) {
+      const payload = signalHistoryPayload(message, conversation, names);
+      if (!payload) continue;
+      recordMessage(target, payload, false);
+      recorded += 1;
+    }
+    recordStatus(target, 'signal-history-page', {
+      conversationId: String(conversation.id),
+      read: messages.length,
+      recorded,
+      olderDone: cursor.olderDone,
+    });
+    saveSignalHistory();
+    return true;
+  }
+  return false;
+}
+
+async function runSignalHistoryStep(): Promise<number> {
+  signalHistory ??= await loadSignalHistory();
+  const accounts = [...targets.values()].filter(
+    target =>
+      target.service === 'signal' &&
+      !target.contents.isDestroyed() &&
+      !target.serviceInstanceId.startsWith('unresolved-'),
+  );
+  let anyReady = false;
+  for (let offset = 0; offset < accounts.length; offset += 1) {
+    const index = (signalHistoryNext + offset) % accounts.length;
+    const target = accounts[index];
+    // Only once Signal has finished its own startup (incl. offline backlog).
+    const ready = await target.contents
+      .executeJavaScriptInIsolatedWorld(999, [
+        {
+          code: 'globalThis.reduxStore?.getState?.()?.app?.hasInitialLoadCompleted===true',
+        },
+      ])
+      .catch(() => false);
+    if (!ready) continue;
+    anyReady = true;
+    try {
+      if (await importSignalHistoryPage(target)) {
+        signalHistoryNext = index + 1;
+        return SIGNAL_HISTORY_PAUSE_MS;
+      }
+    } catch (error) {
+      debug('Signal history page failed', target.serviceInstanceId, error);
+    }
+  }
+  return anyReady ? SIGNAL_HISTORY_IDLE_MS : SIGNAL_HISTORY_WAIT_MS;
+}
+
+function scheduleSignalHistory(delay: number): void {
+  if (signalHistoryTimer) return;
+  signalHistoryTimer = setTimeout(async () => {
+    let next = SIGNAL_HISTORY_IDLE_MS;
+    try {
+      next = await runSignalHistoryStep();
+    } catch (error) {
+      debug('Signal history step failed', error);
+    }
+    signalHistoryTimer = null;
+    scheduleSignalHistory(next);
+  }, delay);
+}
+
 function detectService(url: string): ServiceName | null {
   if (/^https:\/\/web\.whatsapp\.com(?:\/|$)/i.test(url)) return 'whatsapp';
   if (/^https:\/\/web\.telegram\.org\/a(?:\/|$)/i.test(url)) return 'telegram';
@@ -324,7 +662,10 @@ function authoritativeInstanceId(
   // sandboxing is disabled. Do not block capture just because that session path has
   // no service UUID. WebContents id is a runtime instance key; provider account IDs
   // (for example WPP.conn.getMyUserWid()) remain in the normalized message itself.
-  return sessionServiceInstanceId(contents) ?? `${service}-webcontents-${contents.id}`;
+  return (
+    sessionServiceInstanceId(contents) ??
+    `${service}-webcontents-${contents.id}`
+  );
 }
 
 function extractConsoleEnvelope(arguments_: unknown[]): string {
@@ -333,7 +674,8 @@ function extractConsoleEnvelope(arguments_: unknown[]): string {
   // and (event, details:{ message, ... }).
   // Do not depend on a positional argument; find the actual prefixed payload.
   for (const value of arguments_) {
-    if (typeof value === 'string' && value.startsWith(CONSOLE_PREFIX)) return value;
+    if (typeof value === 'string' && value.startsWith(CONSOLE_PREFIX))
+      return value;
     if (value && typeof value === 'object') {
       const message = (value as { message?: unknown }).message;
       if (typeof message === 'string' && message.startsWith(CONSOLE_PREFIX)) {
@@ -344,7 +686,10 @@ function extractConsoleEnvelope(arguments_: unknown[]): string {
   return '';
 }
 
-function queuePendingConsoleEnvelope(contentsId: number, message: string): void {
+function queuePendingConsoleEnvelope(
+  contentsId: number,
+  message: string,
+): void {
   const queue = pendingConsoleEnvelopes.get(contentsId) ?? [];
   queue.push(message);
   if (queue.length > MAX_PENDING_CONSOLE_ENVELOPES) {
@@ -360,19 +705,22 @@ function flushPendingConsoleEnvelopes(target: AttachedTarget): void {
   for (const message of queue) parseConsoleMessage(target, message);
 }
 
-function parseConsoleMessage(
-  target: AttachedTarget,
-  message: string,
-): void {
+function parseConsoleMessage(target: AttachedTarget, message: string): void {
   if (!message.startsWith(CONSOLE_PREFIX)) return;
   try {
-    const envelope = JSON.parse(message.slice(CONSOLE_PREFIX.length)) as ConsoleEnvelope;
+    const envelope = JSON.parse(
+      message.slice(CONSOLE_PREFIX.length),
+    ) as ConsoleEnvelope;
     if (envelope.kind === 'message') {
       recordMessage(target, envelope.payload ?? {});
       return;
     }
     if (envelope.kind === 'status') {
-      recordStatus(target, clean(envelope.status) || 'unknown', envelope.details ?? {});
+      recordStatus(
+        target,
+        clean(envelope.status) || 'unknown',
+        envelope.details ?? {},
+      );
     }
   } catch (error) {
     recordStatus(target, 'bridge-payload-error', {
@@ -2331,274 +2679,6 @@ async function inject(target: AttachedTarget, reason: string): Promise<void> {
   }
 }
 
-const SIGNAL_HISTORY_PRIME_SCRIPT = String.raw`(async () => {
-  const root = globalThis;
-  const store = root.reduxStore;
-  const controller = root.ConversationController;
-  const actions = root.reduxActions?.conversations;
-  if (!store?.getState || !controller?.get || !actions) {
-    return { ok:false, reason:'Signal reduxStore/ConversationController/reduxActions unavailable', attempted:0, loaded:0, failed:0, pages:0, messages:[] };
-  }
-
-  const state = store.getState();
-  const lookup = state?.conversations?.conversationLookup || {};
-  const byServiceId = state?.conversations?.conversationsByServiceId || {};
-  const byE164 = state?.conversations?.conversationsByE164 || {};
-  // Signal itself treats ConversationController.getAll() as the authoritative
-  // in-memory conversation collection. Redux conversationLookup can be a
-  // presentation subset, so merge both and dedupe by conversation id.
-  const conversationById = new Map();
-  if (typeof controller.getAll === 'function') {
-    for (const model of controller.getAll()) {
-      const attrs = model?.attributes || model;
-      const id = String(attrs?.id || model?.id || '');
-      if (id) conversationById.set(id, attrs);
-    }
-  }
-  for (const entry of Object.values(lookup)) {
-    const id = String(entry?.id || '');
-    if (id && !conversationById.has(id)) conversationById.set(id, entry);
-  }
-  const conversations = [...conversationById.values()]
-    .filter(Boolean)
-    .sort((a,b) => Number(b?.activeAt || b?.active_at || b?.timestamp || 0) - Number(a?.activeAt || a?.active_at || a?.timestamp || 0));
-
-  const resolveConversation = value => {
-    if (!value) return {};
-    if (typeof value === 'object') return value;
-    return lookup?.[value] || conversationById.get(String(value)) || {};
-  };
-  const resolveSenderName = msg => {
-    const serviceId = String(msg?.sourceServiceId || '');
-    const e164 = String(msg?.source || '');
-    const serviceEntry = resolveConversation(byServiceId?.[serviceId]);
-    const e164Entry = resolveConversation(byE164?.[e164]);
-    const candidate = serviceEntry?.id ? serviceEntry : (e164Entry?.id ? e164Entry : {});
-    return String(candidate?.title || candidate?.name || candidate?.profileName || candidate?.e164 || '').trim();
-  };
-  const conversationTitle = id => {
-    const conversation = lookup?.[id] || conversationById.get(String(id)) || {};
-    return String(conversation?.title || conversation?.name || conversation?.profileName || conversation?.e164 || id).trim();
-  };
-  const messageOrder = msg => {
-    const received = Number(msg?.received_at_ms || msg?.received_at || 0);
-    const sent = Number(msg?.sent_at || msg?.timestamp || 0);
-    return received || sent || 0;
-  };
-  const oldestMessage = messages => {
-    const valid = (Array.isArray(messages) ? messages : []).filter(msg => msg?.id);
-    valid.sort((a,b) => messageOrder(a) - messageOrder(b));
-    return valid[0];
-  };
-  const newestMessage = messages => {
-    const valid = (Array.isArray(messages) ? messages : []).filter(msg => msg?.id);
-    valid.sort((a,b) => messageOrder(b) - messageOrder(a));
-    return valid[0];
-  };
-  const toPayload = (msg, fallbackConversationId) => {
-    const conversationId = String(msg?.conversationId || fallbackConversationId || '');
-    const messageId = String(msg?.id || '');
-    const body = typeof msg?.body === 'string' ? msg.body.trim() : '';
-    const direction = msg?.type === 'outgoing' ? 'outgoing' : (msg?.type === 'incoming' ? 'incoming' : '');
-    const sentAt = Number(msg?.sent_at || msg?.timestamp || msg?.received_at_ms || msg?.received_at || 0);
-    if (!conversationId || !messageId || !body || !direction || !sentAt) return null;
-    const senderId = direction === 'outgoing' ? '' : String(msg?.sourceServiceId || msg?.source || '');
-    return {
-      conversationId,
-      conversationTitle: conversationTitle(conversationId),
-      messageId,
-      senderId,
-      senderName: direction === 'outgoing' ? '' : resolveSenderName(msg),
-      direction,
-      sentAt,
-      timestampQuality: 'provider',
-      text: body,
-      providerEvent: 'signal-8.17.0-local-sql-history',
-    };
-  };
-
-  const MAX_CONVERSATIONS = 10000;
-  const MAX_PAGES_PER_CONVERSATION = 5000;
-  const MAX_RETURNED_MESSAGES = 1000000;
-  let attempted = 0;
-  let loaded = 0;
-  let failed = 0;
-  let pages = 0;
-  let truncated = false;
-  const returnedById = new Map();
-  const batches = [];
-
-  const captureBatch = payload => {
-    if (!payload || !Array.isArray(payload.messages)) return;
-    const conversationId = String(payload.conversationId || '');
-    if (!conversationId) return;
-    batches.push({ conversationId, messages: payload.messages.slice() });
-  };
-
-  const originalAdded = actions.messagesAdded;
-  const originalReset = actions.messagesReset;
-  let wrappedAdded;
-  let wrappedReset;
-  let intercepted = false;
-
-  if (typeof originalAdded === 'function' && typeof originalReset === 'function') {
-    try {
-      wrappedAdded = function(...args) {
-        captureBatch(args[0]);
-        return originalAdded.apply(actions, args);
-      };
-      wrappedReset = function(...args) {
-        captureBatch(args[0]);
-        return originalReset.apply(actions, args);
-      };
-      actions.messagesAdded = wrappedAdded;
-      actions.messagesReset = wrappedReset;
-      intercepted = actions.messagesAdded === wrappedAdded && actions.messagesReset === wrappedReset;
-    } catch {}
-  }
-
-  const rememberMessages = (conversationId, messages) => {
-    for (const msg of Array.isArray(messages) ? messages : []) {
-      const payload = toPayload(msg, conversationId);
-      if (!payload) continue;
-      returnedById.set(payload.messageId, payload);
-      if (returnedById.size >= MAX_RETURNED_MESSAGES) {
-        truncated = true;
-        break;
-      }
-    }
-  };
-
-  const interceptedSince = (cursor, conversationId) => {
-    const out = [];
-    for (let i = cursor; i < batches.length; i += 1) {
-      const batch = batches[i];
-      if (batch?.conversationId === conversationId) out.push(...(batch.messages || []));
-    }
-    return out;
-  };
-
-  const reduxMessages = conversationId => {
-    const current = store.getState()?.conversations;
-    const ids = current?.messagesByConversation?.[conversationId]?.messageIds;
-    if (!Array.isArray(ids)) return [];
-    return ids.map(id => current?.messagesLookup?.[id]).filter(Boolean);
-  };
-
-  try {
-    for (const conversation of conversations.slice(0, MAX_CONVERSATIONS)) {
-      if (returnedById.size >= MAX_RETURNED_MESSAGES) { truncated = true; break; }
-      const id = String(conversation?.id || '');
-      if (!id) continue;
-      const model = controller.get(id);
-      if (!model || typeof model.loadNewestMessages !== 'function') continue;
-      attempted += 1;
-
-      try {
-        let cursor = batches.length;
-        // Passing true forces a fresh local-SQL newest-page load even when this
-        // conversation is the selected/preloaded one. Signal 8.17.0 otherwise
-        // may consume the preload cache and skip the SQL read.
-        await model.loadNewestMessages(undefined, true);
-
-        // loadNewestMessages can route through loadAndScroll without awaiting it;
-        // wait briefly for messagesReset to arrive before falling back to Redux.
-        for (let wait = 0; wait < 80 && interceptedSince(cursor, id).length === 0; wait += 1) {
-          await new Promise(resolve => setTimeout(resolve, 25));
-        }
-
-        let firstPage = interceptedSince(cursor, id);
-        if (!firstPage.length) firstPage = reduxMessages(id);
-        rememberMessages(id, firstPage);
-        loaded += 1;
-
-        // Signal 8.17.0 loadNewestMessages() can intentionally center the
-        // first page on metrics.oldestUnseen via loadAndScroll(). That page is
-        // not necessarily the newest end of the conversation. Page toward the
-        // newest end first, then page older, using Signal's own model methods.
-        if (typeof model.loadNewerMessages === 'function') {
-          let newest = newestMessage(firstPage);
-          let lastNewestId = '';
-          for (let page = 0; page < MAX_PAGES_PER_CONVERSATION && newest?.id; page += 1) {
-            const newestId = String(newest.id || '');
-            if (!newestId || newestId === lastNewestId) break;
-            lastNewestId = newestId;
-            cursor = batches.length;
-
-            try {
-              await model.loadNewerMessages(newestId);
-            } catch {
-              break;
-            }
-            pages += 1;
-
-            const newer = interceptedSince(cursor, id);
-            if (!newer.length) break;
-            rememberMessages(id, newer);
-            const nextNewest = newestMessage(newer);
-            if (!nextNewest?.id || String(nextNewest.id) === newestId) break;
-            newest = nextNewest;
-            if (returnedById.size >= MAX_RETURNED_MESSAGES) { truncated = true; break; }
-            await new Promise(resolve => setTimeout(resolve, 0));
-          }
-        }
-
-        if (typeof model.loadOlderMessages === 'function') {
-          let oldest = oldestMessage(firstPage);
-          let lastOldestId = '';
-          for (let page = 0; page < MAX_PAGES_PER_CONVERSATION && oldest?.id; page += 1) {
-            const oldestId = String(oldest.id || '');
-            if (!oldestId || oldestId === lastOldestId) break;
-            lastOldestId = oldestId;
-            cursor = batches.length;
-
-            try {
-              await model.loadOlderMessages(oldestId);
-            } catch {
-              break;
-            }
-            pages += 1;
-
-            const older = interceptedSince(cursor, id);
-            if (!older.length) break;
-            rememberMessages(id, older);
-            const nextOldest = oldestMessage(older);
-            if (!nextOldest?.id || String(nextOldest.id) === oldestId) break;
-            oldest = nextOldest;
-            if (returnedById.size >= MAX_RETURNED_MESSAGES) { truncated = true; break; }
-            await new Promise(resolve => setTimeout(resolve, 0));
-          }
-        }
-      } catch (_error) {
-        failed += 1;
-      }
-
-      if (returnedById.size >= MAX_RETURNED_MESSAGES) { truncated = true; break; }
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
-  } finally {
-    try {
-      if (wrappedAdded && actions.messagesAdded === wrappedAdded) actions.messagesAdded = originalAdded;
-      if (wrappedReset && actions.messagesReset === wrappedReset) actions.messagesReset = originalReset;
-    } catch {}
-  }
-
-  if (conversations.length > MAX_CONVERSATIONS) truncated = true;
-  const after = store.getState()?.conversations;
-  return {
-    ok:true,
-    attempted,
-    loaded,
-    failed,
-    pages,
-    intercepted,
-    messages:[...returnedById.values()],
-    cachedConversations:Object.keys(after?.messagesByConversation || {}).length,
-    cachedMessages:Object.keys(after?.messagesLookup || {}).length,
-    truncated,
-  };
-})()`;
-
 const SIGNAL_CACHE_SNAPSHOT_SCRIPT = String.raw`(() => {
   const state = globalThis.reduxStore?.getState?.();
   const conversationsState = state?.conversations;
@@ -2609,6 +2689,8 @@ const SIGNAL_CACHE_SNAPSHOT_SCRIPT = String.raw`(() => {
   const byE164 = conversationsState?.conversationsByE164 || {};
   const result = [];
   const seen = new Set();
+  // Only messages not handed over before (or edited since) are returned.
+  const sent = globalThis.__mactranslateSignalSnapshotSent || (globalThis.__mactranslateSignalSnapshotSent = new Map());
   const resolveConversation = value => {
     if (!value) return {};
     if (typeof value === 'object') return value;
@@ -2635,6 +2717,8 @@ const SIGNAL_CACHE_SNAPSHOT_SCRIPT = String.raw`(() => {
       const type = msg.type === 'outgoing' ? 'outgoing' : (msg.type === 'incoming' ? 'incoming' : '');
       const sentAt = Number(msg.sent_at || msg.timestamp || msg.received_at_ms || msg.received_at || 0);
       if (!body || !type || !sentAt) continue;
+      if (sent.get(uniqueId) === body) continue;
+      sent.set(uniqueId, body);
       const senderId = type === 'outgoing' ? '' : String(msg.sourceServiceId || msg.source || '');
       result.push({
         conversationId: String(msg.conversationId || conversationId || ''),
@@ -2660,38 +2744,22 @@ const SIGNAL_CACHE_SNAPSHOT_SCRIPT = String.raw`(() => {
 })()`;
 
 async function pollSignalCache(target: AttachedTarget): Promise<void> {
-  if (target.service !== 'signal' || target.contents.isDestroyed() || target.signalCacheBusy) return;
+  if (
+    target.service !== 'signal' ||
+    target.contents.isDestroyed() ||
+    target.signalCacheBusy
+  )
+    return;
   target.signalCacheBusy = true;
   try {
-    if (!target.signalHistoryPrimed) {
-      const primed = await target.contents.executeJavaScriptInIsolatedWorld(999, [
-        { code: SIGNAL_HISTORY_PRIME_SCRIPT },
-      ]) as { ok?: boolean; reason?: string; attempted?: number; loaded?: number; failed?: number; pages?: number; intercepted?: boolean; messages?: CapturedPayload[]; cachedConversations?: number; cachedMessages?: number; truncated?: boolean } | null;
-      if (primed?.ok) {
-        const primedMessages = Array.isArray(primed.messages) ? primed.messages : [];
-        for (const message of primedMessages) recordMessage(target, message);
-        target.signalHistoryPrimed = true;
-        recordStatus(target, 'signal-local-history-primed', {
-          attempted: Number(primed.attempted || 0),
-          loaded: Number(primed.loaded || 0),
-          failed: Number(primed.failed || 0),
-          pages: Number(primed.pages || 0),
-          returned: primedMessages.length,
-          intercepted: Boolean(primed.intercepted),
-          truncated: Boolean(primed.truncated),
-          cachedConversations: Number(primed.cachedConversations || 0),
-          cachedMessages: Number(primed.cachedMessages || 0),
-          source: 'Signal 8.17.0 local SQL pages captured before Redux navigation filtering',
-        });
-      } else {
-        recordStatus(target, 'signal-local-history-prime-waiting', {
-          reason: clean(primed?.reason || 'Signal preload state not ready'),
-        });
-      }
-    }
-    const snapshot = await target.contents.executeJavaScriptInIsolatedWorld(999, [
-      { code: SIGNAL_CACHE_SNAPSHOT_SCRIPT },
-    ]) as { messages?: CapturedPayload[]; cachedConversations?: number; cachedMessages?: number } | null;
+    const snapshot = (await target.contents.executeJavaScriptInIsolatedWorld(
+      999,
+      [{ code: SIGNAL_CACHE_SNAPSHOT_SCRIPT }],
+    )) as {
+      messages?: CapturedPayload[];
+      cachedConversations?: number;
+      cachedMessages?: number;
+    } | null;
     const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
     for (const message of messages) recordMessage(target, message);
     recordStatus(target, 'signal-redux-cache-snapshot', {
@@ -2710,7 +2778,12 @@ async function pollSignalCache(target: AttachedTarget): Promise<void> {
 }
 
 function armSignalCachePolling(target: AttachedTarget): void {
-  if (target.service !== 'signal' || target.signalCacheTimer || target.contents.isDestroyed()) return;
+  if (
+    target.service !== 'signal' ||
+    target.signalCacheTimer ||
+    target.contents.isDestroyed()
+  )
+    return;
   void pollSignalCache(target);
   target.signalCacheTimer = setInterval(() => {
     void pollSignalCache(target);
@@ -2760,7 +2833,6 @@ function attach(contents: WebContents): void {
           retryTimer: null,
           signalCacheTimer: null,
           signalCacheBusy: false,
-          signalHistoryPrimed: false,
         };
         recordStatus(temporary, 'waiting-authoritative-instance', {
           attempts: instanceRetryCount,
@@ -2780,7 +2852,8 @@ function attach(contents: WebContents): void {
     let target = targets.get(contents.id);
     if (
       target &&
-      (target.service !== service || target.serviceInstanceId !== serviceInstanceId)
+      (target.service !== service ||
+        target.serviceInstanceId !== serviceInstanceId)
     ) {
       detach(contents);
       target = undefined;
@@ -2797,7 +2870,6 @@ function attach(contents: WebContents): void {
         retryTimer: null,
         signalCacheTimer: null,
         signalCacheBusy: false,
-        signalHistoryPrimed: false,
       };
       targets.set(contents.id, target);
       recordStatus(target, 'target-attached', {
@@ -2839,14 +2911,15 @@ function attach(contents: WebContents): void {
       if (target) {
         target.documentSequence += 1;
         target.lastInjectedSequence = -1;
-        if (target.service === 'signal') target.signalHistoryPrimed = false;
       }
     },
   );
   contents.on('dom-ready', () => tryAttach('dom-ready', true));
   contents.on('did-finish-load', () => tryAttach('did-finish-load', true));
   contents.on('did-navigate', () => tryAttach('did-navigate', false));
-  contents.on('did-navigate-in-page', () => tryAttach('did-navigate-in-page', false));
+  contents.on('did-navigate-in-page', () =>
+    tryAttach('did-navigate-in-page', false),
+  );
   contents.once('destroyed', () => {
     if (instanceRetryTimer) clearTimeout(instanceRetryTimer);
     pendingConsoleEnvelopes.delete(contents.id);
@@ -2863,8 +2936,13 @@ export default function registerUnifiedMessageRecognition(): void {
   const beginRecognitionRun = () => {
     writeCurrentRunMarker();
     for (const contents of webContents.getAllWebContents()) attach(contents);
+    void seedSeenFromArchive().finally(() =>
+      scheduleSignalHistory(SIGNAL_HISTORY_WAIT_MS),
+    );
   };
   if (app.isReady()) beginRecognitionRun();
   else app.once('ready', beginRecognitionRun);
-  debug('RP01 source-backed real-message recognition v6 registered (Signal/WhatsApp/Telegram/Teams)');
+  debug(
+    'RP01 source-backed real-message recognition v6 registered (Signal/WhatsApp/Telegram/Teams)',
+  );
 }
