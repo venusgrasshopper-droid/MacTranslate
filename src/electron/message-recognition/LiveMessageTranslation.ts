@@ -34,6 +34,7 @@ interface ComposerState {
   isComposing?: boolean;
   translationReady?: boolean;
   pendingSend?: boolean;
+  meaningRequest?: string;
 }
 
 interface ComposerApplyResult {
@@ -70,6 +71,10 @@ interface LiveTarget {
 }
 
 const liveTargets = new Map<number, LiveTarget>();
+// Chinese meanings of English composer sentences, shown on hover.
+const sentenceMeanings = new Map<string, string>();
+const SENTENCE_MEANING_LIMIT = 2000;
+const meaningsInFlight = new Set<string>();
 const globalTranslations = new Map<string, TranslationResult>();
 const GLOBAL_TRANSLATION_LIMIT = 4000;
 const SCAN_LIMIT = 40;
@@ -407,6 +412,7 @@ const composerBridgeScript = (service: string) =>
         event.stopPropagation();
         const trailing=sentence.textContent.endsWith(' ')?' ':'';
         sentence.textContent=choice.text.trim()+trailing;
+        if(choice.meaning){sentence.dataset.meaning=choice.meaning;sentence.dataset.meaningFor=choice.text.trim();}
         commitPreview(value);
       });
       popup.appendChild(item);
@@ -427,6 +433,40 @@ const composerBridgeScript = (service: string) =>
       setTimeout(()=>openChoices(value,sentence,clientX,clientY),0);
     },true);
     document.addEventListener('keydown',event=>{if(event.key==='Escape')closeChoices();},true);
+  }
+  // The mouse resting on an English sentence shows its Chinese meaning, so a
+  // translation can be checked before sending.
+  if(!window.__MACTRANSLATE_MEANING_HOVER__){
+    window.__MACTRANSLATE_MEANING_HOVER__=true;
+    let hovered=null;
+    const hideTip=()=>{hovered=null;document.querySelector('.mactranslate-meaning')?.remove();};
+    const showTip=()=>{
+      const text=hovered?.isConnected?hovered.textContent.trim():'';
+      if(!text||document.querySelector('.mactranslate-choices')){hideTip();return;}
+      const ready=hovered.dataset.meaningFor===text&&hovered.dataset.meaning;
+      if(!ready)window.__MACTRANSLATE_MEANING_REQUEST__=text;
+      let tip=document.querySelector('.mactranslate-meaning');
+      if(!tip){
+        tip=document.createElement('div');
+        tip.className='mactranslate-meaning';
+        tip.style.cssText='position:fixed;z-index:2147483647;max-width:360px;padding:5px 9px;border-radius:6px;background:#202124;color:#fff;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:pre-wrap;pointer-events:none;box-shadow:0 2px 10px rgba(0,0,0,.3);';
+        (document.body||document.documentElement).appendChild(tip);
+      }
+      tip.textContent=ready?hovered.dataset.meaning:'正在翻译…';
+      const r=hovered.getBoundingClientRect();
+      const t=tip.getBoundingClientRect();
+      tip.style.left=Math.max(8,Math.min(r.left,innerWidth-t.width-8))+'px';
+      tip.style.top=(r.top-t.height-6>=8?r.top-t.height-6:r.bottom+6)+'px';
+    };
+    window.__MACTRANSLATE_REFRESH_MEANING__=()=>{if(hovered)showTip();};
+    document.addEventListener('mouseover',event=>{
+      const sentence=event.target.closest?.('.mactranslate-composer-translation .mactranslate-sentence')||null;
+      if(sentence===hovered)return;
+      if(!sentence){hideTip();return;}
+      hovered=sentence;
+      showTip();
+    },true);
+    document.addEventListener('mousedown',hideTip,true);
   }
   // Hard rule: no text containing Chinese leaves through any send path
   // (captions, Cmd/Ctrl+Enter, other send buttons). The main composer's plain
@@ -553,6 +593,7 @@ const composerBridgeScript = (service: string) =>
     isComposing,
     translationReady:node.dataset.mactranslateTranslatedSource===text&&Boolean(node.dataset.mactranslateTranslatedText)&&Boolean(appliedReady),
     pendingSend:activePending?.source===text?String(activePending.mode||''):'',
+    meaningRequest:(()=>{const request=window.__MACTRANSLATE_MEANING_REQUEST__||'';window.__MACTRANSLATE_MEANING_REQUEST__='';return request;})(),
   };
 })()
 `;
@@ -610,6 +651,68 @@ const fillChoiceMeanings = async (
   if (contents.isDestroyed()) return;
   await contents.executeJavaScript(
     `(()=>{const preview=document.querySelector('.mactranslate-composer-translation');if(preview?.dataset.mactranslateAppliedSource!==${JSON.stringify(sourceText)})return;const meanings=${JSON.stringify(meaningOf)};for(const span of preview.querySelectorAll('.mactranslate-sentence')){const choices=JSON.parse(span.dataset.choices||'[]');span.dataset.choices=JSON.stringify(choices.map(choice=>({...choice,meaning:meanings[choice.text]||choice.meaning})));}})()`,
+    true,
+  );
+};
+
+// Chinese meaning of each English sentence in the composer preview, for the
+// hover check. One request for all sentences, one per line; one request per
+// sentence when the lines do not come back one-to-one.
+const fillSentenceMeanings = async (
+  contents: WebContents,
+  sentences: string[],
+) => {
+  const texts = [
+    ...new Set(sentences.map(text => text.trim()).filter(Boolean)),
+  ];
+  const wanted = texts.filter(
+    text => !sentenceMeanings.has(text) && !meaningsInFlight.has(text),
+  );
+  if (wanted.length > 0) {
+    for (const text of wanted) meaningsInFlight.add(text);
+    try {
+      const joined = await translateItems([
+        { id: 'meanings', text: wanted.join('\n') },
+      ]);
+      let lines =
+        joined.results[0]?.status === 'ok'
+          ? String(joined.results[0].translatedText ?? '').split('\n')
+          : [];
+      if (lines.length !== wanted.length) {
+        const each = await translateItems(
+          wanted.map((text, index) => ({ id: String(index), text })),
+        );
+        const byId = new Map(
+          each.results.map(result => [String(result.id), result]),
+        );
+        lines = wanted.map((_, index) => {
+          const result = byId.get(String(index));
+          return result?.status === 'ok'
+            ? String(result.translatedText ?? '')
+            : '';
+        });
+      }
+      wanted.forEach((text, index) => {
+        const meaning = lines[index]?.trim();
+        if (!meaning) return;
+        sentenceMeanings.set(text, meaning);
+        if (sentenceMeanings.size > SENTENCE_MEANING_LIMIT) {
+          const oldest = sentenceMeanings.keys().next().value;
+          if (oldest !== undefined) sentenceMeanings.delete(oldest);
+        }
+      });
+    } finally {
+      for (const text of wanted) meaningsInFlight.delete(text);
+    }
+  }
+  const meanings = Object.fromEntries(
+    texts
+      .filter(text => sentenceMeanings.has(text))
+      .map(text => [text, sentenceMeanings.get(text)]),
+  );
+  if (Object.keys(meanings).length === 0 || contents.isDestroyed()) return;
+  await contents.executeJavaScript(
+    `(()=>{const meanings=${JSON.stringify(meanings)};for(const span of document.querySelectorAll('.mactranslate-composer-translation .mactranslate-sentence')){const text=span.textContent.trim();if(meanings[text]){span.dataset.meaning=meanings[text];span.dataset.meaningFor=text;}}window.__MACTRANSLATE_REFRESH_MEANING__?.();})()`,
     true,
   );
 };
@@ -691,14 +794,22 @@ const composerApplyScript = (
     if(preview.dataset.mactranslateAppliedSource!==sourceText){
       if(value){
         value.textContent='';
-        if(Array.isArray(translated.sentences)&&translated.sentences.length){
-          for(const sentence of translated.sentences){
+        // Without Google's sentences (e.g. Apple's translation) the English is
+        // split at sentence ends, so each sentence can still be hovered.
+        const sentences=Array.isArray(translated.sentences)&&translated.sentences.length
+          ? translated.sentences.map(sentence=>({text:sentence.translation,choices:sentence.choices||[]}))
+          : chineseSource
+            ? (translated.translatedText.match(/[^.!?\n]*[.!?]+["'\u2019\u201d)\]]*\s*|[^.!?\n]+\s*|\n+/g)||[]).map(text=>({text,choices:[]}))
+            : [];
+        if(sentences.length){
+          for(const sentence of sentences){
+            if(!sentence.text.trim()){value.appendChild(document.createTextNode(sentence.text));continue;}
             const span=document.createElement('span');
             span.className='mactranslate-sentence';
-            span.dataset.choices=JSON.stringify(sentence.choices||[]);
-            span.textContent=sentence.translation;
+            span.dataset.choices=JSON.stringify(sentence.choices);
+            span.textContent=sentence.text;
             // Each sentence is visibly separate so it is clear which one a click changes.
-            span.style.cssText='border-bottom:1px dashed rgba(10,132,255,.6);border-radius:3px;padding:0 2px;margin-right:3px;cursor:pointer;';
+            span.style.cssText='border-bottom:1px dashed rgba(10,132,255,.6);border-radius:3px;padding:0 2px;margin-right:3px;cursor:'+(sentence.choices.length?'pointer':'text')+';';
             span.addEventListener('mouseenter',()=>{span.style.background='rgba(10,132,255,.16)';});
             span.addEventListener('mouseleave',()=>{span.style.background='';});
             value.appendChild(span);
@@ -808,6 +919,11 @@ const processComposer = async (service: string, contents: WebContents) => {
       composerBridgeScript(service),
       true,
     );
+    if (state?.meaningRequest) {
+      void fillSentenceMeanings(contents, [state.meaningRequest]).catch(
+        () => {},
+      );
+    }
     const text = String(state?.text ?? '').trim();
     if (!text || !state?.direction) return;
     if (text !== target.composerText) {
@@ -815,7 +931,10 @@ const processComposer = async (service: string, contents: WebContents) => {
       target.composerText = text;
       target.composerTextAt = Date.now();
     }
-    if (!state.pendingSend && Date.now() - target.composerTextAt < COMPOSER_SETTLE_MS) {
+    if (
+      !state.pendingSend &&
+      Date.now() - target.composerTextAt < COMPOSER_SETTLE_MS
+    ) {
       return;
     }
     // Signal's IME composition must finish before we touch its composer.
@@ -825,12 +944,27 @@ const processComposer = async (service: string, contents: WebContents) => {
     const result = await translateComposer(text, state.direction);
     if (!result || contents.isDestroyed()) return;
 
-    const applied: ComposerApplyResult | null = await contents.executeJavaScript(
-      composerApplyScript(service, text, result),
-      true,
-    );
+    const applied: ComposerApplyResult | null =
+      await contents.executeJavaScript(
+        composerApplyScript(service, text, result),
+        true,
+      );
     if (result.sentences?.length && googleAvailable()) {
       void fillChoiceMeanings(contents, text, result.sentences).catch(() => {});
+    }
+    if (state.direction === 'zh-en' && result.status === 'ok') {
+      void contents
+        .executeJavaScript(
+          `[...document.querySelectorAll('.mactranslate-composer-translation .mactranslate-sentence')].map(span=>span.textContent)`,
+          true,
+        )
+        .then(sentences =>
+          fillSentenceMeanings(
+            contents,
+            Array.isArray(sentences) ? sentences : [],
+          ),
+        )
+        .catch(() => {});
     }
     if (!applied?.send || contents.isDestroyed()) return;
 
@@ -891,9 +1025,17 @@ const VOICE_SERVICES = new Set(['whatsapp', 'signal', 'telegram']);
 // world, which Electron runs as isolated world 999.
 const SIGNAL_PRELOAD_WORLD = 999;
 
-const runVoiceScript = (service: string, contents: WebContents, code: string) =>
+const runVoiceScript = (
+  service: string,
+  contents: WebContents,
+  code: string,
+) =>
   service === 'signal'
-    ? contents.executeJavaScriptInIsolatedWorld(SIGNAL_PRELOAD_WORLD, [{ code }], true)
+    ? contents.executeJavaScriptInIsolatedWorld(
+        SIGNAL_PRELOAD_WORLD,
+        [{ code }],
+        true,
+      )
     : contents.executeJavaScript(code, true);
 
 const VOICE_PAGE_HELPERS = String.raw`
@@ -1094,16 +1236,41 @@ const voiceApplyScript = (
 
 const processVoices = async (service: string, contents: WebContents) => {
   const target = liveTargets.get(contents.id);
-  if (!VOICE_SERVICES.has(service) || !target || target.voiceBusy || contents.isDestroyed()) return;
+  if (
+    !VOICE_SERVICES.has(service) ||
+    !target ||
+    target.voiceBusy ||
+    contents.isDestroyed()
+  )
+    return;
   target.voiceBusy = true;
-  const show = (id: string, label: string, transcript: string, translation: string) =>
-    runVoiceScript(service, contents, voiceApplyScript(service, id, label, transcript, translation));
+  const show = (
+    id: string,
+    label: string,
+    transcript: string,
+    translation: string,
+  ) =>
+    runVoiceScript(
+      service,
+      contents,
+      voiceApplyScript(service, id, label, transcript, translation),
+    );
   try {
-    const ids: string[] = await runVoiceScript(service, contents, voiceScanScript(service));
-    const id = (Array.isArray(ids) ? ids : []).find(item => !target.voiceDone.has(item));
+    const ids: string[] = await runVoiceScript(
+      service,
+      contents,
+      voiceScanScript(service),
+    );
+    const id = (Array.isArray(ids) ? ids : []).find(
+      item => !target.voiceDone.has(item),
+    );
     if (!id) return;
     target.voiceDone.add(id);
-    const audio = await runVoiceScript(service, contents, voiceAudioScript(service, id));
+    const audio = await runVoiceScript(
+      service,
+      contents,
+      voiceAudioScript(service, id),
+    );
     if (!audio?.ok) {
       await show(id, '语音', String(audio?.message || '读取语音失败'), '');
       return;
@@ -1121,14 +1288,18 @@ const processVoices = async (service: string, contents: WebContents) => {
       await show(id, '语音', transcript.message || '没有识别出文字', '');
       return;
     }
-    const translated = await translateItems([{ id: 'voice', text: transcript.text }]);
+    const translated = await translateItems([
+      { id: 'voice', text: transcript.text },
+    ]);
     const result = translated.results[0];
     if (contents.isDestroyed()) return;
     await show(
       id,
       `语音 · ${result?.sourceLanguage || transcript.locale} → ${result?.targetLanguage || ''}`,
       transcript.text,
-      result?.status === 'ok' ? result.translatedText || '' : result?.message || '翻译失败',
+      result?.status === 'ok'
+        ? result.translatedText || ''
+        : result?.message || '翻译失败',
     );
   } catch {
     // The chat may have changed while the voice message was processed.

@@ -554,7 +554,7 @@ export const DEFAULT_APP_SETTINGS = {
   showDisabledServices: true,
   isTwoFactorAutoCatcherEnabled: false,
   twoFactorAutoCatcherMatcher: 'token, code, sms, verify',
-  showServiceName: false,
+  showServiceName: true,
   showMessageBadgeWhenMuted: true,
   showDragArea: false,
   enableSpellchecking: true,

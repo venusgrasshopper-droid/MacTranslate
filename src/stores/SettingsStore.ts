@@ -243,5 +243,17 @@ export default class SettingsStore extends TypedStore {
 
       debug('Migrated default user-agent settings');
     });
+
+    // Several accounts of one service look alike; show each one's name.
+    this._ensureMigrationAndMarkDone('show-service-names', () => {
+      this.actions.settings.update({
+        type: 'app',
+        data: {
+          showServiceName: true,
+        },
+      });
+
+      debug('Migrated service names on');
+    });
   }
 }
