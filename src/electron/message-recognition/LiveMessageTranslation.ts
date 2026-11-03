@@ -317,9 +317,20 @@ const composerBridgeScript = (service: string) =>
     }
     return null;
   };
+  // Opaque, in the chat's own colors, so messages behind it do not show through.
+  const opaqueBackground=node=>{
+    for(let el=node;el&&el.nodeType===1;el=el.parentElement){
+      const bg=getComputedStyle(el).backgroundColor;
+      const rgba=bg.match(/rgba?\(([^)]+)\)/);
+      if(rgba){const parts=rgba[1].split(',').map(Number);if(parts.length===3||parts[3]===1)return bg;}
+    }
+    return matchMedia('(prefers-color-scheme: dark)').matches?'#1e1e1e':'#ffffff';
+  };
   const positionPreview=(preview,node)=>{
     const rect=node?.getBoundingClientRect?.();
     if(!rect||rect.width<=0||rect.height<=0)return;
+    preview.style.background='linear-gradient(rgba(10,132,255,.08),rgba(10,132,255,.08)),'+opaqueBackground(node);
+    preview.style.color=getComputedStyle(node).color;
     const width=Math.max(220,Math.min(rect.width,innerWidth-16));
     const left=Math.max(8,Math.min(rect.left,innerWidth-width-8));
     preview.style.left=left+'px';
