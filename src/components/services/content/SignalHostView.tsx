@@ -57,6 +57,8 @@ export default class SignalHostView extends Component<IProps, IState> {
     window.addEventListener('blur', this.scheduleSync);
 
     void this.loadStatus();
+    // Start this account in the background now, not when first shown.
+    void ipcRenderer.invoke('signal-host:ensure', this.props.service.id);
     this.scheduleSync();
   }
 

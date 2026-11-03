@@ -119,6 +119,11 @@ class SignalAccountView {
   }
 
   private attachView(view: WebContentsView): void {
+    // Started in the background: lay out at window size until it is shown.
+    if (!this.bounds) {
+      const { width, height } = this.parentWindow.getContentBounds();
+      this.bounds = { x: 0, y: 0, width, height };
+    }
     this.parentWindow.contentView.addChildView(view);
     view.setVisible(this.active);
     this.applyBounds();
@@ -377,6 +382,33 @@ class SignalAccountView {
     return this.status();
   }
 
+  isStarted(): boolean {
+    return (
+      Boolean(this.startPromise) ||
+      Boolean(this.view && !this.view.webContents.isDestroyed())
+    );
+  }
+
+  // Loaded: Signal finished its own startup (including the backlog from
+  // while it was offline), or shows the link screen of an unlinked account.
+  async waitUntilLoaded(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const contents = this.view?.webContents;
+      if (!contents || contents.isDestroyed() || this.state === 'error') return;
+      const app = await contents
+        .executeJavaScriptInIsolatedWorld(999, [
+          {
+            code: 'JSON.stringify(globalThis.reduxStore?.getState?.()?.app??null)',
+          },
+        ])
+        .then(value => JSON.parse(String(value)))
+        .catch(() => null);
+      if (app?.hasInitialLoadCompleted || app?.appView === 'Installer') return;
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+
   async activate(bounds?: HostBounds): Promise<SignalHostStatus> {
     this.active = true;
     if (bounds) {
@@ -521,12 +553,18 @@ class SignalAccountView {
   }
 }
 
+const BACKGROUND_START_TIMEOUT_MS = 3 * 60_000;
+
 export default class SignalRuntimeHost {
   private readonly parentWindow: BrowserWindow;
 
   private readonly accounts = new Map<string, SignalAccountView>();
 
   private activeServiceId: string | null = null;
+
+  private readonly startQueue: string[] = [];
+
+  private startQueueRunning = false;
 
   constructor(parentWindow: BrowserWindow) {
     this.parentWindow = parentWindow;
@@ -595,8 +633,33 @@ export default class SignalRuntimeHost {
     return account;
   }
 
-  async ensure(serviceId: string): Promise<SignalHostStatus> {
-    return this.account(serviceId).start();
+  // Every Signal account starts in the background at launch, one after
+  // another: the next starts once the previous has loaded (or after 3
+  // minutes), so many accounts do not all load at once.
+  ensure(serviceId: string): SignalHostStatus {
+    const id = normalizeServiceId(serviceId);
+    const account = this.account(id);
+    if (!account.isStarted() && !this.startQueue.includes(id)) {
+      this.startQueue.push(id);
+      void this.runStartQueue();
+    }
+    return account.status();
+  }
+
+  private async runStartQueue(): Promise<void> {
+    if (this.startQueueRunning) return;
+    this.startQueueRunning = true;
+    try {
+      while (this.startQueue.length > 0) {
+        const id = this.startQueue.shift();
+        const account = id ? this.accounts.get(id) : undefined;
+        if (!account || account.isStarted()) continue;
+        await account.start();
+        await account.waitUntilLoaded(BACKGROUND_START_TIMEOUT_MS);
+      }
+    } finally {
+      this.startQueueRunning = false;
+    }
   }
 
   async activate(serviceId: string, bounds: unknown): Promise<SignalHostStatus> {
