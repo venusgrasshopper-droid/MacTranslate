@@ -26,6 +26,7 @@ interface ScannedMessage {
   key?: string;
   text?: string;
   hasTranslation?: boolean;
+  onScreen?: boolean;
 }
 
 interface ComposerState {
@@ -58,6 +59,12 @@ interface LiveTarget {
   messageTimer: NodeJS.Timeout | null;
   composerTimer: NodeJS.Timeout | null;
   messageBusy: boolean;
+  // Messages on screen still waiting for a translation, and texts being
+  // translated now. Scanning never waits for a translation to finish.
+  messageQueue: ScannedMessage[];
+  inFlight: Set<string>;
+  batchesInFlight: number;
+  attempts: Map<string, number>;
   composerBusy: boolean;
   composerQueued: boolean;
   composerKickTimer: NodeJS.Timeout | null;
@@ -87,8 +94,14 @@ const rememberMeaning = (text: string, meaning: string) => {
 };
 const globalTranslations = new Map<string, TranslationResult>();
 const GLOBAL_TRANSLATION_LIMIT = 4000;
-const SCAN_LIMIT = 40;
-const BATCH_LIMIT = 12;
+// Messages on screen plus one screen above and half a screen below, so the
+// ones about to scroll into view are already translated.
+const SCAN_LIMIT = 80;
+const MESSAGE_BATCHES = 2;
+const MESSAGE_BATCH_TEXTS = 20;
+const MESSAGE_BATCH_CHARS = 5000;
+const RETRY_FIRST_MS = 3000;
+const RETRY_MAX_MS = 60_000;
 const MESSAGE_POLL_MS = 650;
 const COMPOSER_POLL_MS = 16;
 const COMPOSER_KICK_DELAY_MS = 0;
@@ -125,6 +138,11 @@ const scanScript = (service: string) => String.raw`
     const rect=node.getBoundingClientRect?.();
     return Boolean(rect&&rect.width>0&&rect.height>0&&rect.bottom>=0&&rect.top<=innerHeight);
   };
+  const near=node=>{
+    if(!node?.isConnected)return false;
+    const rect=node.getBoundingClientRect?.();
+    return Boolean(rect&&rect.width>0&&rect.height>0&&rect.bottom>=-innerHeight&&rect.top<=innerHeight*1.5);
+  };
   const textFrom=(source,removeSelectors=[])=>{
     if(!source)return '';
     const clone=source.cloneNode(true);
@@ -137,17 +155,18 @@ const scanScript = (service: string) => String.raw`
   };
   const result=[];
   const push=(row,key,text,direction)=>{
-    if(!row||!visible(row)||!text||!key)return;
+    if(!row||!near(row)||!text||!key)return;
     result.push({
+      onScreen:visible(row),
       key:clean(key).slice(0,4096),
       text:clean(text).slice(0,20000),
       direction:direction==='outgoing'?'outgoing':'incoming',
-      hasTranslation:[...(row.querySelectorAll?.('.mactranslate-live-translation')||[])].some(box=>box.dataset.mactranslateSource===clean(text).slice(0,20000)),
+      hasTranslation:[...(row.querySelectorAll?.('.mactranslate-live-translation')||[])].some(box=>box.dataset.mactranslateSource===clean(text).slice(0,20000)&&box.dataset.mactranslateOk==='1'),
     });
   };
 
   if(service==='telegram'){
-    const rows=[...document.querySelectorAll('.Message.message-list-item[data-message-id]')].filter(visible).slice(-LIMIT);
+    const rows=[...document.querySelectorAll('.Message.message-list-item[data-message-id]')].filter(near).slice(-LIMIT);
     for(const row of rows){
       const source=row.querySelector('.text-content')||row.querySelector('.message-content-wrapper');
       const text=textFrom(source,['.MessageMeta','.message-time','.message-signature','.message-replies-wrapper','.message-action-buttons-container','.message-action-buttons','.Reactions','.message-select-control','.InlineButtons','.inline-buttons','button']);
@@ -155,7 +174,7 @@ const scanScript = (service: string) => String.raw`
       push(row,'id:'+id,text,row.classList.contains('own')?'outgoing':'incoming');
     }
   } else if(service==='signal'){
-    const rows=[...document.querySelectorAll('[data-message-id][role="listitem"]')].filter(visible).slice(-LIMIT);
+    const rows=[...document.querySelectorAll('[data-message-id][role="listitem"]')].filter(near).slice(-LIMIT);
     for(const row of rows){
       const message=row.querySelector('.module-message');
       const source=message?.querySelector('.module-message__text');
@@ -166,7 +185,7 @@ const scanScript = (service: string) => String.raw`
   } else if(service==='teams'){
     const selector=['[data-tid="chat-pane-message"]','[data-tid="message-list-item"]','[data-tid="message-group-container"]','div[role="listitem"]','div[data-tid^="message-"]','div[data-mid]'].join(',');
     const sourceSelectors=['[id^="message-body-"] [id^="content-"]','[id^="content-"]','[data-tid="message-content"]','[data-tid="message-body"]','[data-tid="bubble-text"]','[data-tid^="message-content-"]','[data-tid^="messageBody"]','[role="document"]','.ts-message-content','.message-body','.ui-chat__messagecontent'];
-    const rows=[...document.querySelectorAll(selector)].filter(visible).slice(-LIMIT);
+    const rows=[...document.querySelectorAll(selector)].filter(near).slice(-LIMIT);
     for(const row of rows){
       let source=null;
       for(const sourceSelector of sourceSelectors){source=row.querySelector(sourceSelector);if(source)break;}
@@ -178,7 +197,7 @@ const scanScript = (service: string) => String.raw`
       push(row,'id:'+(id||text.slice(0,200)),text,row.matches('[data-is-self="true"],.own')||Boolean(row.querySelector('[data-is-self="true"]'))?'outgoing':'incoming');
     }
   } else if(service==='whatsapp'){
-    const nodes=[...document.querySelectorAll('[data-pre-plain-text]')].filter(visible).slice(-LIMIT);
+    const nodes=[...document.querySelectorAll('[data-pre-plain-text]')].filter(near).slice(-LIMIT);
     for(const node of nodes){
       const row=node.closest('[data-id],[role="row"],.message-in,.message-out')||node;
       const source=node.querySelector('.selectable-text.copyable-text')||node.querySelector('.selectable-text')||node;
@@ -207,7 +226,7 @@ const applyScript = (
   const translated=${JSON.stringify(translated)};
   const clean=value=>String(value??'').replace(/\u200b/g,'').replace(/\u00a0/g,' ').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   const cssEscape=value=>globalThis.CSS?.escape?CSS.escape(value):String(value).replace(/["\\]/g,'\\$&');
-  const visible=node=>{const r=node?.getBoundingClientRect?.();return Boolean(r&&r.width>0&&r.height>0&&r.bottom>=0&&r.top<=innerHeight);};
+  const visible=node=>{const r=node?.getBoundingClientRect?.();return Boolean(r&&r.width>0&&r.height>0&&r.bottom>=-innerHeight&&r.top<=innerHeight*1.5);};
   const textFrom=source=>{
     if(!source)return '';
     const clone=source.cloneNode(true);
@@ -268,6 +287,7 @@ const applyScript = (
     try{anchor.insertAdjacentElement('afterend',box);}catch{row.appendChild(box);}
   }
   box.dataset.mactranslateSource=wanted.text;
+  box.dataset.mactranslateOk=translated.status==='ok'?'1':'0';
   const label=box.querySelector('.mactranslate-live-translation-label');
   const value=box.querySelector('.mactranslate-live-translation-text');
   if(label)label.textContent=(translated.sourceLanguage||'auto')+' → '+(translated.targetLanguage||'');
@@ -1350,39 +1370,23 @@ const processVoices = async (service: string, contents: WebContents) => {
   }
 };
 
-const processTarget = async (service: string, contents: WebContents) => {
-  const target = liveTargets.get(contents.id);
-  if (!target || target.messageBusy || contents.isDestroyed()) return;
-  target.messageBusy = true;
+const retryLater = (target: LiveTarget, text: string) => {
+  const attempts = (target.attempts.get(text) ?? 0) + 1;
+  target.attempts.set(text, attempts);
+  target.failedUntil.set(
+    text,
+    Date.now() + Math.min(RETRY_MAX_MS, RETRY_FIRST_MS * 2 ** (attempts - 1)),
+  );
+};
+
+const translateMessages = async (
+  service: string,
+  contents: WebContents,
+  target: LiveTarget,
+  messages: ScannedMessage[],
+) => {
+  const texts = messages.map(message => String(message.text ?? '').trim());
   try {
-    const scanned = await contents.executeJavaScript(scanScript(service), true);
-    const messages: ScannedMessage[] = Array.isArray(scanned) ? scanned : [];
-    if (!messages.length) return;
-
-    const waiting = new Map<string, ScannedMessage[]>();
-    for (const message of messages) {
-      const text = String(message?.text ?? '').trim();
-      if (!translatableText(text) || message.hasTranslation) continue;
-      const known = target.cache.get(text) ?? globalTranslations.get(text);
-      if (
-        known?.status === 'ok' ||
-        known?.status === 'languagePackRequired' ||
-        known?.status === 'unsupportedSystem'
-      ) {
-        await contents.executeJavaScript(
-          applyScript(service, message, known),
-          true,
-        );
-        continue;
-      }
-      if ((target.failedUntil.get(text) ?? 0) > Date.now()) continue;
-      const group = waiting.get(text) ?? [];
-      group.push(message);
-      waiting.set(text, group);
-    }
-
-    const texts = [...waiting.keys()].slice(0, BATCH_LIMIT);
-    if (!texts.length) return;
     const response = await translateItems(
       texts.map((text, index) => ({ id: String(index), text })),
     );
@@ -1392,28 +1396,105 @@ const processTarget = async (service: string, contents: WebContents) => {
     for (let index = 0; index < texts.length; index += 1) {
       const text = texts[index];
       const result = byId.get(String(index));
-      if (!result) {
-        target.failedUntil.set(text, Date.now() + 5000);
-        continue;
+      if (result?.status === 'ok') {
+        target.attempts.delete(text);
+        target.cache.set(text, result);
+        rememberGlobal(text, result);
+      } else {
+        retryLater(target, text);
+        // Language pack / macOS version notes are shown until it works.
+        if (
+          result?.status !== 'languagePackRequired' &&
+          result?.status !== 'unsupportedSystem'
+        ) {
+          continue;
+        }
       }
-      target.cache.set(text, result);
-      rememberGlobal(text, result);
-      if (
-        result.status !== 'ok' &&
-        result.status !== 'languagePackRequired' &&
-        result.status !== 'unsupportedSystem'
-      ) {
-        target.failedUntil.set(text, Date.now() + 15_000);
-        continue;
-      }
-      for (const message of waiting.get(text) ?? []) {
-        if (contents.isDestroyed()) return;
+      if (contents.isDestroyed()) return;
+      await contents.executeJavaScript(
+        applyScript(service, messages[index], result),
+        true,
+      );
+    }
+  } catch {
+    for (const text of texts) retryLater(target, text);
+  } finally {
+    for (const text of texts) target.inFlight.delete(text);
+    target.batchesInFlight -= 1;
+    if (liveTargets.get(contents.id) === target) {
+      startTranslations(service, contents, target);
+    }
+  }
+};
+
+// Up to MESSAGE_BATCHES requests at once, each with up to MESSAGE_BATCH_TEXTS
+// messages; when one finishes the next messages near the screen start.
+const startTranslations = (
+  service: string,
+  contents: WebContents,
+  target: LiveTarget,
+) => {
+  while (
+    target.batchesInFlight < MESSAGE_BATCHES &&
+    target.messageQueue.length > 0 &&
+    !contents.isDestroyed()
+  ) {
+    const batch: ScannedMessage[] = [];
+    let chars = 0;
+    while (target.messageQueue.length > 0 && batch.length < MESSAGE_BATCH_TEXTS) {
+      const message = target.messageQueue[0];
+      const text = String(message.text ?? '').trim();
+      if (batch.length > 0 && chars + text.length > MESSAGE_BATCH_CHARS) break;
+      target.messageQueue.shift();
+      if (!text || target.inFlight.has(text)) continue;
+      target.inFlight.add(text);
+      batch.push(message);
+      chars += text.length;
+    }
+    if (batch.length === 0) continue;
+    target.batchesInFlight += 1;
+    void translateMessages(service, contents, target, batch);
+  }
+};
+
+const processTarget = async (service: string, contents: WebContents) => {
+  const target = liveTargets.get(contents.id);
+  if (!target || target.messageBusy || contents.isDestroyed()) return;
+  target.messageBusy = true;
+  try {
+    const scanned = await contents.executeJavaScript(scanScript(service), true);
+    const messages: ScannedMessage[] = Array.isArray(scanned) ? scanned : [];
+    const queue: ScannedMessage[] = [];
+    const queued = new Set<string>();
+    const now = Date.now();
+    for (const message of messages) {
+      const text = String(message?.text ?? '').trim();
+      if (!translatableText(text) || message.hasTranslation) continue;
+      const known = target.cache.get(text) ?? globalTranslations.get(text);
+      if (known?.status === 'ok') {
         await contents.executeJavaScript(
-          applyScript(service, message, result),
+          applyScript(service, message, known),
           true,
         );
+        continue;
       }
+      if (
+        target.inFlight.has(text) ||
+        queued.has(text) ||
+        (target.failedUntil.get(text) ?? 0) > now
+      ) {
+        continue;
+      }
+      queued.add(text);
+      queue.push(message);
     }
+    // Only what is near the screen now, messages on screen first; messages
+    // scrolled away wait until they are near the screen again.
+    target.messageQueue = [
+      ...queue.filter(message => message.onScreen),
+      ...queue.filter(message => !message.onScreen),
+    ];
+    startTranslations(service, contents, target);
   } catch {
     // Ignore transient page errors; the next poll retries.
   } finally {
@@ -1434,6 +1515,10 @@ export const armLiveMessageTranslation = (
       messageTimer: null,
       composerTimer: null,
       messageBusy: false,
+      messageQueue: [],
+      inFlight: new Set(),
+      batchesInFlight: 0,
+      attempts: new Map(),
       composerBusy: false,
       composerQueued: false,
       composerKickTimer: null,

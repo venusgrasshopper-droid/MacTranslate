@@ -77,10 +77,12 @@ const executableHelperPath = (): string => {
 const translationCache = new Map<string, Omit<MacOSTranslationResult, 'id'>>();
 const TRANSLATION_CACHE_LIMIT = 5000;
 
+// languagePackRequired is not remembered: right after the translation service
+// starts it briefly reports installed packs as missing, and a remembered
+// answer would leave those messages untranslated until restart.
 const rememberTranslation = (text: string, result: MacOSTranslationResult) => {
   if (
     result.status !== 'ok' &&
-    result.status !== 'languagePackRequired' &&
     result.status !== 'unsupportedLanguage' &&
     result.status !== 'unsupportedPair'
   ) {
