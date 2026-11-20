@@ -100,6 +100,8 @@ const SCAN_LIMIT = 80;
 const MESSAGE_BATCHES = 2;
 const MESSAGE_BATCH_TEXTS = 20;
 const MESSAGE_BATCH_CHARS = 5000;
+// A request that takes longer frees its place; its messages are retried.
+const MESSAGE_BATCH_TIMEOUT_MS = 20_000;
 const RETRY_FIRST_MS = 3000;
 const RETRY_MAX_MS = 60_000;
 const MESSAGE_POLL_MS = 650;
@@ -215,15 +217,15 @@ const scanScript = (service: string) => String.raw`
 })()
 `;
 
+// Puts translations under their messages, all in one call so a list that
+// re-creates its rows gets every translation back at once.
 const applyScript = (
   service: string,
-  wanted: ScannedMessage,
-  translated: TranslationResult,
+  items: Array<{ wanted: ScannedMessage; translated: TranslationResult }>,
 ) => String.raw`
 (() => {
   const service=${JSON.stringify(service)};
-  const wanted=${JSON.stringify(wanted)};
-  const translated=${JSON.stringify(translated)};
+  const items=${JSON.stringify(items)};
   const clean=value=>String(value??'').replace(/\u200b/g,'').replace(/\u00a0/g,' ').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   const cssEscape=value=>globalThis.CSS?.escape?CSS.escape(value):String(value).replace(/["\\]/g,'\\$&');
   const visible=node=>{const r=node?.getBoundingClientRect?.();return Boolean(r&&r.width>0&&r.height>0&&r.bottom>=-innerHeight&&r.top<=innerHeight*1.5);};
@@ -235,6 +237,7 @@ const applyScript = (
     for(const br of clone.querySelectorAll?.('br')||[])br.replaceWith(document.createTextNode('\n'));
     return clean(clone.innerText||clone.textContent);
   };
+  const applyOne=(wanted,translated)=>{
   let row=null;
   let anchor=null;
   const id=wanted.key.startsWith('id:')?wanted.key.slice(3):'';
@@ -294,6 +297,43 @@ const applyScript = (
   if(value)value.textContent=translated.status==='ok'?(translated.translatedText||''):(translated.message||'翻译失败');
   box.style.borderLeftColor=translated.status==='ok'?'#0a84ff':'#ff9f0a';
   return true;
+  };
+  const results=items.map(item=>applyOne(item.wanted,item.translated));
+  // Finished translations stay in the page: when the chat list re-creates a
+  // message row (scrolling back, re-rendering), its translation is put back
+  // right away instead of on the next scan.
+  const memory=window.__MACTRANSLATE_LIVE_MEMORY__||(window.__MACTRANSLATE_LIVE_MEMORY__=new Map());
+  for(const item of items){
+    if(item.translated.status!=='ok'||!String(item.wanted.key||'').startsWith('id:'))continue;
+    memory.delete(item.wanted.key);
+    memory.set(item.wanted.key,item);
+    if(memory.size>500)memory.delete(memory.keys().next().value);
+  }
+  window.__MACTRANSLATE_LIVE_APPLY__=applyOne;
+  const rowSelector={telegram:'.Message.message-list-item[data-message-id]',signal:'[data-message-id][role="listitem"]',teams:'div[data-mid]',whatsapp:'[data-id]'}[service];
+  if(rowSelector&&!window.__MACTRANSLATE_LIVE_OBSERVER__){
+    const idAttribute=service==='teams'?'data-mid':service==='whatsapp'?'data-id':'data-message-id';
+    window.__MACTRANSLATE_LIVE_OBSERVER__=new MutationObserver(records=>{
+      const rows=new Set();
+      for(const record of records){
+        for(const node of record.addedNodes){
+          if(node.nodeType!==1)continue;
+          const own=node.closest?.(rowSelector);
+          if(own)rows.add(own);
+          for(const row of node.querySelectorAll?.(rowSelector)||[])rows.add(row);
+        }
+      }
+      const apply=window.__MACTRANSLATE_LIVE_APPLY__;
+      const saved=window.__MACTRANSLATE_LIVE_MEMORY__;
+      for(const row of rows){
+        const item=saved?.get('id:'+clean(row.getAttribute(idAttribute)));
+        if(!item||row.querySelector('.mactranslate-live-translation[data-mactranslate-ok="1"]'))continue;
+        try{apply(item.wanted,item.translated);}catch{}
+      }
+    });
+    window.__MACTRANSLATE_LIVE_OBSERVER__.observe(document.body,{childList:true,subtree:true});
+  }
+  return results;
 })()
 `;
 
@@ -1386,13 +1426,24 @@ const translateMessages = async (
   messages: ScannedMessage[],
 ) => {
   const texts = messages.map(message => String(message.text ?? '').trim());
+  let timer: NodeJS.Timeout | undefined;
   try {
-    const response = await translateItems(
-      texts.map((text, index) => ({ id: String(index), text })),
-    );
+    const response = await Promise.race([
+      translateItems(texts.map((text, index) => ({ id: String(index), text }))),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('timeout')),
+          MESSAGE_BATCH_TIMEOUT_MS,
+        );
+      }),
+    ]);
     const byId = new Map(
       (response.results ?? []).map(result => [String(result.id), result]),
     );
+    const apply: Array<{
+      wanted: ScannedMessage;
+      translated: TranslationResult;
+    }> = [];
     for (let index = 0; index < texts.length; index += 1) {
       const text = texts[index];
       const result = byId.get(String(index));
@@ -1410,15 +1461,15 @@ const translateMessages = async (
           continue;
         }
       }
-      if (contents.isDestroyed()) return;
-      await contents.executeJavaScript(
-        applyScript(service, messages[index], result),
-        true,
-      );
+      apply.push({ wanted: messages[index], translated: result });
+    }
+    if (apply.length > 0 && !contents.isDestroyed()) {
+      await contents.executeJavaScript(applyScript(service, apply), true);
     }
   } catch {
     for (const text of texts) retryLater(target, text);
   } finally {
+    clearTimeout(timer);
     for (const text of texts) target.inFlight.delete(text);
     target.batchesInFlight -= 1;
     if (liveTargets.get(contents.id) === target) {
@@ -1466,16 +1517,17 @@ const processTarget = async (service: string, contents: WebContents) => {
     const messages: ScannedMessage[] = Array.isArray(scanned) ? scanned : [];
     const queue: ScannedMessage[] = [];
     const queued = new Set<string>();
+    const known: Array<{
+      wanted: ScannedMessage;
+      translated: TranslationResult;
+    }> = [];
     const now = Date.now();
     for (const message of messages) {
       const text = String(message?.text ?? '').trim();
       if (!translatableText(text) || message.hasTranslation) continue;
-      const known = target.cache.get(text) ?? globalTranslations.get(text);
-      if (known?.status === 'ok') {
-        await contents.executeJavaScript(
-          applyScript(service, message, known),
-          true,
-        );
+      const cached = target.cache.get(text) ?? globalTranslations.get(text);
+      if (cached?.status === 'ok') {
+        known.push({ wanted: message, translated: cached });
         continue;
       }
       if (
@@ -1487,6 +1539,9 @@ const processTarget = async (service: string, contents: WebContents) => {
       }
       queued.add(text);
       queue.push(message);
+    }
+    if (known.length > 0) {
+      await contents.executeJavaScript(applyScript(service, known), true);
     }
     // Only what is near the screen now, messages on screen first; messages
     // scrolled away wait until they are near the screen again.
